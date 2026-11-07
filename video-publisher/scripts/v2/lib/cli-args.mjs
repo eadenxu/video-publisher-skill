@@ -21,7 +21,7 @@ const VALUE_FLAGS = new Set([
   "--operation",
 ]);
 
-const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost"]);
+const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost", "diagnose-binding", "diagnose-dedup"]);
 
 export function parsePublisherArgs(argv, context) {
   const { loadConfig, PLATFORMS, UsageError, positive, defaultStateRoot } = context;
@@ -45,6 +45,8 @@ export function parsePublisherArgs(argv, context) {
     spacePrefix: "video publisher v2",
     spaceName: "",
     spaceSuffix: "",
+    diagnosis: "",
+    accountBinding: null,
     cleanupNames: ["oil-collect-publish"],
     cleanupPrefixes: [],
     packagePath: "",
@@ -123,6 +125,13 @@ export function parsePublisherArgs(argv, context) {
     throw new UsageError(`--operation must be one of: ${[...OPERATIONS].join(", ")}`);
   }
   if (options.operation === "inspect") options.inspectOnly = true;
+  if (options.operation === "diagnose-binding" || options.operation === "diagnose-dedup") {
+    options.inspectOnly = true;
+    options.freshSpace = false;
+    options.diagnosis = options.operation;
+  }
+  const normalizedBinding = config.accounts?.xiaohongshu || null;
+  if (normalizedBinding) options.accountBinding = normalizedBinding;
   if (options.operation === "replace-cover" && !options.jobId) {
     throw new UsageError("--operation replace-cover requires --job-id for the existing READY draft");
   }

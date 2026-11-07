@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { normalizeAccountBinding } from "../v2/lib/account-binding.mjs";
 
 export const CONFIG_SCHEMA_VERSION = 2;
 const LEGACY_CONFIG_SCHEMA_VERSION = 1;
@@ -62,11 +63,18 @@ export function defaultConfig() {
     cover: {
       uploadExistingByDefault: false,
     },
+    accounts: {
+      xiaohongshu: null,
+    },
   };
 }
 
 export function normalizeConfig(raw = {}) {
   const fallback = defaultConfig();
+  const binding = normalizeAccountBinding(raw.accounts?.xiaohongshu);
+  const accountKeys = raw.accounts && typeof raw.accounts === "object" && !Array.isArray(raw.accounts)
+    ? Object.keys(raw.accounts).filter(key => key !== "xiaohongshu" && key !== "bindingErrors")
+    : [];
   const rawSchemaVersion = Number(raw.schemaVersion ?? fallback.schemaVersion);
   const defaultPlatforms = Array.isArray(raw.defaultPlatforms)
     ? cleanList(raw.defaultPlatforms)
@@ -118,6 +126,13 @@ export function normalizeConfig(raw = {}) {
     cover: {
       uploadExistingByDefault: raw.cover?.uploadExistingByDefault === true,
     },
+    accounts: {
+      xiaohongshu: binding.ok ? binding.binding : null,
+      bindingErrors: [
+        ...(binding.ok ? [] : binding.errors),
+        ...(accountKeys.length ? [`accounts only supports xiaohongshu: ${accountKeys.join(", ")}`] : []),
+      ],
+    },
   };
 }
 
@@ -147,6 +162,10 @@ export function validateConfig(config) {
   if (!ORIGINALITY_POLICIES.includes(config.declarations.originalityPolicy)) {
     errors.push(`declarations.originalityPolicy must be one of: ${ORIGINALITY_POLICIES.join(", ")}`);
   }
+  if (config.accounts?.bindingErrors?.length) errors.push(...config.accounts.bindingErrors);
+  if (config.accounts?.xiaohongshu && !config.availablePlatforms.includes("xiaohongshu")) {
+    errors.push("accounts.xiaohongshu requires xiaohongshu in availablePlatforms");
+  }
   for (const key of ["checkConcurrency", "uploadConcurrency"]) {
     const value = config.execution[key];
     if (!Number.isInteger(value) || value < 1) errors.push(`execution.${key} must be a positive integer`);
@@ -170,6 +189,7 @@ export function configStatus(configPath = resolveConfigPath()) {
   const empty = !raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).length === 0;
   const config = normalizeConfig(empty ? {} : raw);
   const errors = [...(parseError ? [`invalid JSON: ${parseError}`] : []), ...validateConfig(config)];
+  if (config.accounts) delete config.accounts.bindingErrors;
   const warnings = [];
   if (path.isAbsolute(config.sourceDirectory)) {
     if (!fs.existsSync(config.sourceDirectory)) warnings.push(`sourceDirectory does not exist: ${config.sourceDirectory}`);
@@ -213,9 +233,11 @@ export function createOnboardedConfig(input = {}) {
     platforms: input.platforms,
     execution: input.execution,
     cover: input.cover,
+    accounts: input.accounts,
   });
   const errors = validateConfig(config);
   if (errors.length) throw new Error(errors.join("; "));
+  if (config.accounts) delete config.accounts.bindingErrors;
   return config;
 }
 
@@ -224,10 +246,14 @@ export function writeConfig(config, configPath = resolveConfigPath()) {
   const errors = validateConfig(normalized);
   if (normalized.onboarding.completed !== true) errors.push("onboarding.completed must be true");
   if (errors.length) throw new Error(errors.join("; "));
+  const stored = {
+    ...normalized,
+    accounts: { xiaohongshu: normalized.accounts?.xiaohongshu || null },
+  };
   const absolutePath = path.resolve(configPath);
   fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
   const temporaryPath = `${absolutePath}.tmp-${process.pid}`;
-  fs.writeFileSync(temporaryPath, `${JSON.stringify(normalized, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(temporaryPath, `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(temporaryPath, absolutePath);
   fs.chmodSync(absolutePath, 0o600);
   return absolutePath;

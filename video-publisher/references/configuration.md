@@ -79,6 +79,20 @@ node scripts/config.mjs validate
 
 只有命令成功且 `onboardingRequired` 为 `false` 才继续发布。
 
+## 小红书 Profile 与账号绑定
+
+绑定写在 Skill 目录之外的私有配置里。它不修改 Ego 的全局默认 Profile，也不使用 `ego-browser import --profile`。`profileId` 必须来自只读 `profiles()` 的实际 id；`--profile-label` 只给人看，不会传给 `taskSpace`。
+
+```bash
+node scripts/config.mjs bind-account xiaohongshu \
+  --profile-id "PASTE_PROFILE_ID_FROM_DIAGNOSE_BINDING" \
+  --profile-label "PASTE_HUMAN_LABEL_NOT_USED_AS_ID" \
+  --display-name "PASTE_ACCOUNT_DISPLAY_NAME" \
+  --account-id "PASTE_ACCOUNT_ID"
+```
+
+先跑 `references/scripts.md` 里的 `--operation diagnose-binding`，再把诊断结果中的 id 填进来。若 `profileId` 看起来像 `Profile 2` 这种标签，运行时仍只在 `profiles()` 列出完全相同的字符串时接受它，不能靠标签猜。未配置绑定时，原有平台行为不变。配错或页面身份对不上时，创建、恢复和 inspect 都会在上传前停止。
+
 ## 新增平台
 
 不要为了新增账号重新运行 `onboard`，因为它会重建完整配置。用户确认账号后使用非破坏命令：

@@ -27,8 +27,11 @@ import {
   buildSpaceName,
   cleanupTaskSpaces,
   retireCurrentSpaces,
+  runEgoScript,
   shouldRotateSpaces,
 } from "./lib/spaces.mjs";
+import { bindingDiagnosticScript, sameAccountBinding, sanitizeDiagnostic } from "./lib/account-binding.mjs";
+import { evaluatePlatformDedup, normalizeXhsRequirements } from "./lib/xhs-fields.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.join(os.homedir(), ".video-publisher", "v2-jobs");
@@ -195,6 +198,48 @@ async function migrateLegacyIdentity(store, state, identity, args) {
   await store.save();
 }
 
+async function runBindingDiagnostic() {
+  const script = bindingDiagnosticScript();
+  if (/taskSpace\s*\(|openOrReuseTab|page\.goto|\bclick\s*\(/.test(script)) {
+    throw new Error("binding diagnostic script must stay read-only");
+  }
+  let result;
+  try {
+    result = await runEgoScript(script);
+  } catch (error) {
+    return { ok: false, captured: false, accepted: false, liveVerified: false, pageOpened: false, taskSpaceCalled: false, error: String(error?.message || error) };
+  }
+  const match = `${result.stdout}\n${result.stderr}`.match(/VIDEO_PUBLISHER_BINDING_DIAGNOSTIC:(\{.*\})/);
+  if (!match || result.code !== 0) {
+    return {
+      ok: false,
+      captured: false,
+      accepted: false,
+      liveVerified: false,
+      pageOpened: false,
+      taskSpaceCalled: false,
+      exitCode: result.code,
+      detail: `${result.stderr}\n${result.stdout}`.trim().slice(-800),
+    };
+  }
+  try {
+    const payload = JSON.parse(match[1]);
+    return {
+      ok: true,
+      captured: true,
+      accepted: false,
+      liveVerified: false,
+      livePageAcceptance: "pending",
+      pageOpened: payload.pageOpened === true,
+      taskSpaceCalled: payload.taskSpaceCalled === true,
+      profiles: sanitizeDiagnostic(payload.profiles),
+      spaces: sanitizeDiagnostic(payload.spaces),
+    };
+  } catch (error) {
+    return { ok: false, captured: false, accepted: false, liveVerified: false, error: `diagnostic payload was not JSON: ${String(error?.message || error)}` };
+  }
+}
+
 async function persistKeepSpace(store, state, args, closeCurrent) {
   if (args.keepSpace) state.keepSpace = true;
   else if (closeCurrent) state.keepSpace = false;
@@ -279,6 +324,9 @@ async function main() {
   if (args.operation !== "replace-cover") await migrateLegacyIdentity(store, state, identity, args);
   const incomingStatus = state.status;
   const incomingInProgress = IN_PROGRESS_STATUSES.includes(incomingStatus);
+  if (state.accountBinding && args.accountBinding && !sameAccountBinding(state.accountBinding, args.accountBinding)) {
+    throw new UsageError("Job account binding does not match the current configuration. Refusing to retarget this job.");
+  }
   if (args.operation === "auto" && stateExisted && incomingStatus === "ready") {
     throw new UsageError(`Job ${jobId} is already READY. Use --operation inspect, --operation replace-cover, or --operation repost --confirm-new-copy.`);
   }
@@ -335,6 +383,58 @@ async function main() {
     console.error(`[video-publisher-v2] restored corrupt job state from atomic backup; preserved=${store.lastRecovery.corruptPath}`);
   }
   if (state.fingerprint !== identity.fingerprint) throw new Error(`Job ${jobId} belongs to another package`);
+  if (args.accountBinding && args.platforms.includes("xiaohongshu")) {
+    state.accountBinding = {
+      platform: "xiaohongshu",
+      profileId: args.accountBinding.profileId,
+      displayName: args.accountBinding.displayName,
+      accountId: args.accountBinding.accountId,
+    };
+  }
+  if (args.platforms.includes("xiaohongshu")) {
+    state.requestedFields = {
+      ...(state.requestedFields || {}),
+      xiaohongshu: normalizeXhsRequirements(pkg),
+      scheduleAuthorizesFinalPublish: false,
+    };
+  }
+  if (args.diagnosis) {
+    if (args.diagnosis === "diagnose-binding" && (args.platforms.length !== 1 || args.platforms[0] !== "xiaohongshu")) {
+      throw new UsageError("diagnose-binding supports only --platforms xiaohongshu");
+    }
+    const diagnostic = args.diagnosis === "diagnose-binding"
+      ? await runBindingDiagnostic()
+      : {
+        ok: false,
+        accepted: false,
+        liveVerified: false,
+        jobDedupUsed: false,
+        jobDedupSatisfiesPlatformDedup: false,
+        source: "not-queried",
+        queries: state.requestedFields?.xiaohongshu?.dedup?.queries || [],
+        judgement: evaluatePlatformDedup(
+          { required: true, queries: state.requestedFields?.xiaohongshu?.dedup?.queries || [] },
+          { source: "not-queried", liveVerified: false, jobDedupUsed: false },
+        ),
+      };
+    state.diagnostics = { ...(state.diagnostics || {}), [args.diagnosis]: { ...diagnostic, recordedAt: new Date().toISOString() } };
+    state.status = incomingStatus === "ready" ? "ready" : (incomingInProgress ? incomingStatus : "inspected");
+    await store.save();
+    await store.close();
+    console.log(JSON.stringify({
+      schemaVersion: 4,
+      jobId,
+      operation: args.diagnosis,
+      ready: false,
+      accepted: false,
+      finalPublishAuthorized: false,
+      scheduleAuthorizesFinalPublish: false,
+      statePath: store.statePath,
+      diagnostic,
+    }, null, 2));
+    if (diagnostic.ok !== true || diagnostic.accepted === false) process.exitCode = args.diagnosis === "diagnose-binding" && diagnostic.captured === true ? 0 : 10;
+    return;
+  }
   for (const platform of args.platforms) state.platforms[platform] ||= { status: "new", taskSpaceId: null, taskSpaceName: null, videoReceipt: null, receipts: {}, verdict: null, history: [] };
   for (const platform of args.platforms) {
     const item = state.platforms[platform];
@@ -607,6 +707,8 @@ function summary(state, platforms, statePath) {
     operation: state.revisions?.at(-1)?.operation || "unknown",
     status: state.status,
     ready: platforms.every(platform => state.platforms[platform].verdict?.ready === true),
+    finalPublishAuthorized: false,
+    scheduleAuthorizesFinalPublish: false,
     statePath,
     scheduler: state.scheduler,
     platforms: Object.fromEntries(platforms.map(platform => {

@@ -79,3 +79,36 @@ test("clean guard permits one explicit release and can be armed again", async ()
   await vm.runInContext("armFinalPublishGuard()", runner);
   assert.equal(click(), true);
 });
+
+test("a configured schedule time does not release the scheduled-publish control", async () => {
+  const listeners = [];
+  class FakeElement {
+    matches(selector) { return selector.includes("button"); }
+    getAttribute() { return null; }
+    get innerText() { return "定时发布"; }
+  }
+  const page = vm.createContext({
+    window: {},
+    Element: FakeElement,
+    document: { addEventListener(type, handler) { if (type === "click") listeners.push(handler); } },
+  });
+  const runner = vm.createContext({
+    platform: "xiaohongshu",
+    js: async expression => vm.runInContext(expression, page),
+  });
+  vm.runInContext(fs.readFileSync(corePath, "utf8"), runner);
+  const button = new FakeElement();
+  const click = () => {
+    const event = {
+      target: button,
+      composedPath: () => [button],
+      prevented: false,
+      preventDefault() { this.prevented = true; },
+      stopImmediatePropagation() {},
+    };
+    listeners.forEach(handler => handler(event));
+    return event.prevented;
+  };
+  await vm.runInContext("armFinalPublishGuard()", runner);
+  assert.equal(click(), true);
+});

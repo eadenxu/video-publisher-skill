@@ -49,7 +49,7 @@ description: "将本地视频、标题和封面准备为小红书、抖音、B�
 
    同一个多平台 Job 只恢复或重开部分平台时，必须沿用原 `--job-id` 并加 `--no-cleanup-stale-spaces`，防止清理影响未选平台的待发布页面；命令若报告关闭了当前 Job 的未选平台空间，不得宣称页面仍可见，必须恢复对应平台。
 
-   平台参数省略时使用配置中的默认平台。仅在用户确认当前视频原创权利后追加 `--confirm-original-rights`。
+   平台参数省略时使用配置中的默认平台。仅在用户确认当前视频原创权利后追加 `--confirm-original-rights`。小红书 Profile 绑定、定时读回和笔记去重见 `references/scripts.md`；配置中的时间不是最终发布授权。
 6. 读取命令最后输出的结构化摘要：
    - `ready: true`：所有所选平台已验证。草稿页留着，你检查后自己点发布；
    - `ready: false`：逐个平台报告 `blocker`、`missing` 和 `evidencePath`，不要笼统宣称失败或成功；

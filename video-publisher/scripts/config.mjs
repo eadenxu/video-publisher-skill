@@ -22,6 +22,7 @@ function usage() {
     "  node scripts/config.mjs validate",
     "  node scripts/config.mjs onboard --source-dir <path> [options]",
     "  node scripts/config.mjs add-platform <platform> [--default] [platform options]",
+    "  node scripts/config.mjs bind-account xiaohongshu --profile-id <profiles()-id> --display-name <name> --account-id <id> [--profile-label <label>]",
     "",
     "Repeatable options:",
     "  --available-platform <xiaohongshu|douyin|bilibili|wechat_channels|youtube>",
@@ -41,12 +42,16 @@ function usage() {
     "  --youtube-language <visible label>",
     "  --youtube-visibility <private|unlisted|public>",
     "  --default  Add the platform to defaultPlatforms as well",
+    "  --profile-id <id from profiles()>   Not a display label and not an import --profile value",
+    "  --profile-label <human label>       Stored for operators; never sent as profileId",
+    "  --display-name <account name>",
+    "  --account-id <platform account id>",
   ].join("\n");
 }
 
 function parseOptions(argv) {
   const repeatable = new Set(["--available-platform", "--platform", "--recurring-tag", "--douyin-topic", "--bilibili-auto-tag"]);
-  const single = new Set(["--source-dir", "--locale", "--copy-style", "--originality-policy", "--check-concurrency", "--upload-concurrency", "--youtube-category", "--youtube-language", "--youtube-visibility"]);
+  const single = new Set(["--source-dir", "--locale", "--copy-style", "--originality-policy", "--check-concurrency", "--upload-concurrency", "--youtube-category", "--youtube-language", "--youtube-visibility", "--profile-id", "--profile-label", "--display-name", "--account-id"]);
   const boolean = new Set(["--upload-existing-cover-by-default", "--default"]);
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
@@ -127,6 +132,40 @@ try {
     };
     writeConfig(updated, configPath);
     print(configStatus(configPath));
+  } else if (command === "bind-account") {
+    const [platform, ...optionArgs] = argv;
+    if (platform !== "xiaohongshu") throw new Error("bind-account currently supports only xiaohongshu");
+    const options = parseOptions(optionArgs);
+    const disallowed = Object.keys(options).filter(flag => !["--profile-id", "--profile-label", "--display-name", "--account-id"].includes(flag));
+    if (disallowed.length) throw new Error(`unsupported bind-account option: ${disallowed.join(", ")}`);
+    const current = loadConfig({ configPath, requireOnboarded: true });
+    if (!current.availablePlatforms.includes("xiaohongshu")) {
+      throw new Error("xiaohongshu must already be an available platform before binding an account");
+    }
+    const updated = {
+      ...current,
+      onboarding: { ...current.onboarding, updatedAt: new Date().toISOString() },
+      accounts: {
+        xiaohongshu: {
+          profileId: options["--profile-id"],
+          profileLabel: options["--profile-label"] || "",
+          displayName: options["--display-name"],
+          accountId: options["--account-id"],
+        },
+      },
+    };
+    writeConfig(updated, configPath);
+    const status = configStatus(configPath);
+    print({
+      ...status,
+      accountBinding: {
+        platform: "xiaohongshu",
+        profileIdSource: "profiles()",
+        labelIsNotProfileId: true,
+        labelLikeProfileId: status.config.accounts?.xiaohongshu?.labelLikeProfileId === true,
+        defaultProfileUnchanged: true,
+      },
+    });
   } else if (command === "onboard") {
     const options = parseOptions(argv);
     if (options["--default"]) throw new Error("--default is valid only with add-platform");

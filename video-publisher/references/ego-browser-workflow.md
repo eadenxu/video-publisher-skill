@@ -8,9 +8,15 @@ Use Ego Lite for every creator-platform browser action. The production orchestra
 - Platform URLs, lifecycle, and file upload
 - Real input, diagnostics, and verification
 
+## Profiles
+
+Ego Lite 0.6.2.7 documents `await profiles()`, `await listTaskSpaces()`, and `await taskSpace(nameOrId, { profileId? })`. `profileId` applies only when a space is created. It does not move an existing space. The id has to be one returned by `profiles()`; do not invent it from a display label, and do not use `import --profile` or an undocumented `nodejs --profile`. The bundled guide says a script does not inherit the shell environment and must use absolute paths, so the runner writes binding values into the script.
+
+`diagnose-binding` is the read-only inventory. It must not call `taskSpace` or open a creator page. This repository does not contain a captured `profiles()` payload, so a real id remains a later parent diagnosis. Do not change the global default profile to test a binding.
+
 ## Task Spaces
 
-Use one persistent task space per platform. Store both its numeric id and its exact stable name.
+Use one persistent task space per platform. Store both its numeric id and its exact stable name. When an account binding is configured, do not treat a matching name as the requested profile.
 
 ```js
 await useOrCreateTaskSpace(taskSpaceId)

@@ -76,7 +76,7 @@ Options:
 --platform <name>          (repeatable)
 --platforms a,b,c
 --task-suffix <name>
---operation <auto|create|resume|inspect|replace-cover|repost>
+--operation <auto|create|resume|inspect|replace-cover|repost|diagnose-binding|diagnose-dedup>
 --inspect-only
 --replace-cover            replace covers on an existing READY draft; requires --job-id
 --confirm-new-copy         required with --operation repost
@@ -103,6 +103,52 @@ Options:
 Space policy: a new job gets a unique space. `running`, `inspecting`, `paused_user`, and `blocked` jobs reuse the recorded space so drafts and receipts stay attached. An implicit rerun of a `READY` job exits with usage error and performs no browser work. After READY, this job's draft pages stay open so the user can click publish. That keep-flag is written to `state.json`. Stale cleanup only closes retired spaces, leftover `oil-collect-publish`, and other `ready`/`inspected` jobs that were explicitly closed with `--close-on-complete`. `--inspect-only` does not close an in-progress or kept job. `--cleanup-only --package` takes the job lock and can close a finished job's current spaces; it never closes an in-progress job. It does not prefix-sweep `video publisher v2 *`. `USER_CONTROL` never closes spaces.
 
 To resume an interrupted generation, repeat the same command with the same `--job-id`, or add `--operation resume`. To inspect a READY draft use `--operation inspect`. To create an intentional second copy use `--operation repost --confirm-new-copy`; omit `--job-id` for a generated new identity, or provide a new unused id. To close leftover spaces without generating: `scripts/run-safe-platforms.sh --cleanup-only`.
+
+## Xiaohongshu account binding, schedule readback, and history dedup
+
+These commands are the only maintained entry. They do not change Ego's global default profile, do not call `import --profile`, and do not pass `--profile` / `--profileId` to `ego-browser nodejs`. Ego scripts do not inherit shell environment variables; the runner writes the binding into the script.
+
+`profileId` must be an id returned by `profiles()`. A human label such as `Profile 2` is not sent as that id. `taskSpace(name, { profileId })` applies the id only when creating a space. Resume calls `taskSpace(id)` without `profileId` and refuses to open the page unless `listTaskSpaces()` shows that same id on the existing space. A matching space name is not proof of the profile. Create, resume, and inspect each read the live account again; a mismatch or an unproven identity stops before upload.
+
+```bash
+node scripts/config.mjs bind-account xiaohongshu \
+  --profile-id "PASTE_PROFILE_ID_FROM_DIAGNOSE_BINDING" \
+  --profile-label "PASTE_HUMAN_LABEL_NOT_USED_AS_ID" \
+  --display-name "PASTE_ACCOUNT_DISPLAY_NAME" \
+  --account-id "PASTE_ACCOUNT_ID"
+
+scripts/run-safe-platforms.sh \
+  --package /absolute/package.json \
+  --platforms xiaohongshu \
+  --job-id SAME-JOB \
+  --state-root /absolute/state-root \
+  --operation diagnose-binding \
+  --no-cleanup-stale-spaces
+```
+
+`diagnose-binding` only calls `profiles()` and `listTaskSpaces()`. It does not create a space or open a page. Its stdout is not live acceptance. Copy the real `profileId` into the private config, then prepare:
+
+```bash
+scripts/run-safe-platforms.sh \
+  --package /absolute/package.json \
+  --platforms xiaohongshu \
+  --job-id SAME-JOB \
+  --state-root /absolute/state-root \
+  --operation create \
+  --no-cleanup-stale-spaces
+```
+
+After a crash, keep the same package, `--job-id`, and `--state-root`, and use `--operation resume --reuse-space --no-cleanup-stale-spaces`. Do not mint a new job when the result is unknown. `--operation inspect` reads the same job again. `--operation diagnose-dedup` records that job-level dedup is not platform history dedup; it does not open note management and cannot return READY. The publisher lock stays under the fixed lock root and still blocks a second job that uses another `--state-root`.
+
+`xhsSchedule` is validated as an Asia/Shanghai civil time. It does not authorize `releaseForConfirmedPublish` or a click on `发布` or `定时发布`. A missing or unproven schedule control is `SCHEDULE_CONTROL_UNVERIFIED`, which does not mean the platform lacks scheduling. AI declaration, collection, prose, and the 3:4 cover require a fresh readback; a click receipt is not field success. Platform history dedup stays `PLATFORM_HISTORY_UNVERIFIED` until a later live note-management read exists. Do not treat that pending state as acceptance.
+
+Final publish, only after a separate explicit authorization for this job and these platforms:
+
+1. `--operation inspect` on the same job still reports that platform `READY`, with the same draft identity and a fresh account match.
+2. The page guard is armed, `blockedAttempts` is 0, and `finalPublishClicked` is false.
+3. Call `releaseForConfirmedPublish()` once and require `ok: true`.
+4. Click one final control that matches the authorized action. A configured schedule time does not select or authorize that control.
+5. If the platform result cannot be read back, report it as unconfirmed. Do not click again and do not create another draft.
 
 Replace covers on an existing READY draft without uploading the video again:
 
