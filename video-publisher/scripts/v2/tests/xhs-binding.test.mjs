@@ -11,7 +11,10 @@ import {
   bindingDiagnosticScript,
   compareAccountObservation,
   describeProfileInventory,
+  describeSpaceInventory,
   explainDiscoveryConfig,
+  extractProfileRecords,
+  extractSpaceRecords,
   normalizeAccountBinding,
   planTaskSpace,
 } from "../lib/account-binding.mjs";
@@ -109,6 +112,75 @@ test("an existing space is not opened when its profile cannot be proven", () => 
   assert.equal(resume.action, "resume");
   assert.equal(resume.passProfileId, false);
   assert.equal(resume.nameOrId, 41);
+});
+
+test("runtime profiles() id/name/isDefault records keep a literal Profile id", () => {
+  const runtime = [{ id: "Profile 2", isDefault: false, name: "AI" }];
+  const extracted = extractProfileRecords(runtime);
+  assert.equal(extracted.shape, "ego-profile-id-name");
+  assert.equal(extracted.records[0].profileId, "Profile 2");
+  assert.equal(extracted.records[0].label, "AI");
+  assert.equal(extracted.records[0].sourceField, "id");
+  const described = describeProfileInventory(runtime);
+  assert.equal(described.accountVerified, false);
+  assert.equal(described.ready, false);
+  assert.equal(described.profiles[0].rawIdField, "id");
+  assert.equal(described.profiles[0].labelField, "name");
+  assert.equal(described.profiles[0].idLooksLikeDisplayLabel, true);
+  assert.equal(described.profiles[0].idEqualsLabel, false);
+  assert.equal(described.profiles[0].doNotBindUsing, "label");
+  const planned = planTaskSpace({
+    binding: { profileId: "Profile 2", profileLabel: "AI", displayName: "Example Creator", accountId: "1000000001" },
+    taskName: "new-space",
+    taskSpaceRef: "",
+    profilesPayload: runtime,
+    spacesPayload: [],
+  });
+  assert.equal(planned.ok, true);
+  assert.equal(planned.action, "create");
+  assert.equal(planned.passProfileId, true);
+  assert.equal(planned.profileId, "Profile 2");
+  const labelIsNotId = planTaskSpace({
+    binding: { profileId: "AI", displayName: "Example Creator", accountId: "1000000001" },
+    taskName: "new-space",
+    taskSpaceRef: "",
+    profilesPayload: runtime,
+    spacesPayload: [],
+  });
+  assert.equal(labelIsNotId.ok, false);
+  assert.equal(labelIsNotId.code, "PROFILE_NOT_LISTED");
+  const empty = planTaskSpace({
+    binding: { profileId: "Profile 2", displayName: "Example Creator", accountId: "1000000001" },
+    taskName: "new-space",
+    taskSpaceRef: "",
+    profilesPayload: [],
+    spacesPayload: [],
+  });
+  assert.equal(empty.ok, false);
+  assert.equal(empty.code, "PROFILE_LIST_UNVERIFIED");
+  const missingDefault = extractProfileRecords([{ id: "Profile 2", name: "AI" }]);
+  assert.equal(missingDefault.shape, "unrecognized");
+  assert.deepEqual(missingDefault.records, []);
+});
+
+test("listTaskSpaces arrays parse without treating an empty inventory as a verified resume", () => {
+  const empty = extractSpaceRecords([]);
+  assert.equal(empty.shape, "array");
+  assert.deepEqual(empty.records, []);
+  const described = describeSpaceInventory([]);
+  assert.equal(described.shape, "array");
+  assert.equal(described.resumeVerified, false);
+  assert.equal(described.absenceNotProven, true);
+  assert.equal(described.opened, false);
+  const listed = extractSpaceRecords([{ id: 9, name: "kept", ownership: "agent", profileId: "Other" }]);
+  assert.equal(listed.shape, "array");
+  assert.equal(listed.records[0].profileId, "Other");
+  assert.equal(describeSpaceInventory(listed.records).resumeVerified, false);
+  const profileIsNotASpace = extractSpaceRecords([{ id: "Profile 2", isDefault: false, name: "AI" }]);
+  assert.deepEqual(profileIsNotASpace.records, []);
+  const unknown = extractSpaceRecords({ unexpected: [{ directory: "Profile 2" }] });
+  assert.equal(unknown.shape, "unrecognized");
+  assert.deepEqual(unknown.records, []);
 });
 
 test("unrecognized profile payloads fail closed before a space is planned", () => {
@@ -470,8 +542,8 @@ test("profile discovery runs without media or a writable job and create still re
     for await (const chunk of process.stdin) script += chunk;
     fs.writeFileSync(process.env.VIDEO_PUBLISHER_TEST_SCRIPT, script);
     console.log("VIDEO_PUBLISHER_BINDING_DIAGNOSTIC:" + JSON.stringify({
-      profiles: [{ profileId: "prof-real", label: "Profile 2" }],
-      spaces: [{ id: 7, name: "existing", profileId: "prof-real" }],
+      profiles: [{ id: "Profile 2", isDefault: false, name: "AI" }],
+      spaces: [],
       taskSpaceCalled: false,
       pageOpened: false
     }));
@@ -508,8 +580,14 @@ test("profile discovery runs without media or a writable job and create still re
   assert.equal(summary.config.bindingUsed, false);
   assert.match(summary.config.notes.join("\n"), /sourceDirectory does not exist/);
   assert.match(summary.config.notes.join("\n"), /placeholder/);
-  assert.equal(summary.diagnostic.profileInventory.profiles[0].profileId, "prof-real");
-  assert.equal(summary.diagnostic.profileInventory.profiles[0].label, "Profile 2");
+  assert.equal(summary.diagnostic.profileInventory.shape, "ego-profile-id-name");
+  assert.equal(summary.diagnostic.profileInventory.profiles[0].profileId, "Profile 2");
+  assert.equal(summary.diagnostic.profileInventory.profiles[0].label, "AI");
+  assert.equal(summary.diagnostic.profileInventory.profiles[0].rawIdField, "id");
+  assert.equal(summary.diagnostic.profileInventory.accountVerified, false);
+  assert.equal(summary.diagnostic.spaceInventory.shape, "array");
+  assert.equal(summary.diagnostic.spaceInventory.resumeVerified, false);
+  assert.equal(summary.diagnostic.spaceInventory.absenceNotProven, true);
   assert.equal(summary.diagnostic.spaceInventory.created, false);
   assert.equal(summary.diagnostic.spaceInventory.opened, false);
   assert.equal(summary.diagnostic.defaultProfileChanged, false);

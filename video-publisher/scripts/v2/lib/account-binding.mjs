@@ -48,41 +48,80 @@ function walk(node, depth, visit) {
   }
 }
 
+function isRuntimeProfile(node) {
+  return Boolean(node)
+    && typeof node === "object"
+    && !Array.isArray(node)
+    && typeof node.id === "string"
+    && node.id.trim()
+    && typeof node.name === "string"
+    && typeof node.isDefault === "boolean";
+}
+
+function uniqueRecords(records) {
+  const unique = [];
+  const seen = new Set();
+  for (const record of records) {
+    if (!record.profileId || seen.has(record.profileId)) continue;
+    seen.add(record.profileId);
+    unique.push(record);
+  }
+  return unique;
+}
+
 export function extractProfileRecords(payload) {
-  if (Array.isArray(payload) && payload.length && payload.every(item => typeof item === "string")) {
+  if (Array.isArray(payload) && payload.length === 0) {
+    return { records: [], keys: [], shape: "array" };
+  }
+  if (Array.isArray(payload) && payload.every(item => typeof item === "string")) {
     return {
-      records: payload.map(profileId => ({ profileId: String(profileId), label: "" })),
+      records: payload.filter(Boolean).map(profileId => ({
+        profileId: String(profileId),
+        label: "",
+        sourceField: "string",
+        labelField: "",
+      })),
       keys: [],
       shape: "string-array",
     };
   }
-  const records = [];
   const keys = new Set();
+  const nodes = [];
   walk(payload, 0, node => {
     for (const key of Object.keys(node)) keys.add(key);
-    if (node.profileId == null) return;
-    const profileId = String(node.profileId).trim();
-    if (!profileId) return;
-    records.push({
-      profileId,
-      label: String(node.label || node.name || node.title || "").trim(),
-    });
+    nodes.push(node);
   });
-  const unique = [];
-  const seen = new Set();
-  for (const record of records) {
-    if (seen.has(record.profileId)) continue;
-    seen.add(record.profileId);
-    unique.push(record);
+  const runtime = nodes.filter(isRuntimeProfile).map(node => ({
+    profileId: node.id.trim(),
+    label: node.name.trim(),
+    sourceField: "id",
+    labelField: "name",
+    isDefault: node.isDefault,
+  }));
+  if (runtime.length) {
+    return { records: uniqueRecords(runtime), keys: [...keys], shape: "ego-profile-id-name" };
   }
-  return { records: unique, keys: [...keys], shape: unique.length ? "profileId-field" : "unrecognized" };
+  const explicit = nodes.filter(node => node.profileId != null && String(node.profileId).trim()).map(node => ({
+    profileId: String(node.profileId).trim(),
+    label: String(node.label || node.name || node.title || "").trim(),
+    sourceField: "profileId",
+    labelField: node.label != null ? "label" : (node.name != null ? "name" : ""),
+  }));
+  if (explicit.length) {
+    return { records: uniqueRecords(explicit), keys: [...keys], shape: "profileId-field" };
+  }
+  return { records: [], keys: [...keys], shape: "unrecognized" };
 }
 
 export function extractSpaceRecords(payload) {
+  if (Array.isArray(payload) && payload.length === 0) {
+    return { records: [], keys: [], shape: "array" };
+  }
   const records = [];
   const keys = new Set();
   walk(payload, 0, node => {
     for (const key of Object.keys(node)) keys.add(key);
+    if (isRuntimeProfile(node)) return;
     const name = node.name == null ? "" : String(node.name);
     const id = node.spaceId != null ? node.spaceId : node.id;
     if (!name && id == null) return;
@@ -102,7 +141,8 @@ export function extractSpaceRecords(payload) {
     seen.add(key);
     unique.push(record);
   }
-  return { records: unique, keys: [...keys] };
+  const shape = Array.isArray(payload) ? "array" : (unique.length ? "object" : "unrecognized");
+  return { records: unique, keys: [...keys], shape };
 }
 
 export function planTaskSpace({ binding, taskName, taskSpaceRef, profilesPayload, spacesPayload }) {
@@ -119,7 +159,7 @@ export function planTaskSpace({ binding, taskName, taskSpaceRef, profilesPayload
     return {
       ok: false,
       code: "PROFILE_LIST_UNVERIFIED",
-      message: "profiles() 没有返回可识别的 profileId。未创建空间，未打开页面。需要父级核对只读诊断里的原始字段。",
+      message: "profiles() 没有可识别的 id，或返回空库存。未创建空间，未打开页面。空库存不允许创建。",
       evidence: { keys: profiles.keys, shape: profiles.shape, liveVerified: false, livePageAcceptance: "pending" },
     };
   }
@@ -128,7 +168,7 @@ export function planTaskSpace({ binding, taskName, taskSpaceRef, profilesPayload
     return {
       ok: false,
       code: "PROFILE_NOT_LISTED",
-      message: "配置的 profileId 不在 profiles() 结果中。不会把 Profile 标签当作 id，也不会切换默认 Profile。",
+      message: "配置的 profileId 不在 profiles() 的 id 列表中。显示 name 不会代替 id；已列出的 id 不会因为看起来像标签而被拒绝。未切换默认 Profile。",
       evidence: {
         configuredProfileId: binding.profileId,
         labelLikeProfileId: LABEL_LIKE_PROFILE_ID.test(binding.profileId),
@@ -314,10 +354,12 @@ export function describeProfileInventory(payload) {
       return {
         profileId: record.profileId,
         label,
+        rawIdField: record.sourceField || "",
+        labelField: record.labelField || "",
         idEqualsLabel: Boolean(label) && record.profileId === label,
         idLooksLikeDisplayLabel: LABEL_LIKE_PROFILE_ID.test(record.profileId),
         bindUsing: "profileId",
-        doNotBindUsing: label ? "label" : "",
+        doNotBindUsing: label && label !== record.profileId ? "label" : "",
       };
     }),
     accountVerified: false,
@@ -328,6 +370,7 @@ export function describeProfileInventory(payload) {
 export function describeSpaceInventory(payload) {
   const extracted = extractSpaceRecords(payload);
   return {
+    shape: extracted.shape,
     observedKeys: extracted.keys,
     spaces: extracted.records.map(record => ({
       id: record.id,
@@ -340,6 +383,8 @@ export function describeSpaceInventory(payload) {
     opened: false,
     switched: false,
     closed: false,
+    resumeVerified: false,
+    absenceNotProven: extracted.records.length === 0,
   };
 }
 
@@ -350,7 +395,7 @@ export function explainDiscoveryConfig({ exists = false, onboardingRequired = fa
   for (const error of errors) notes.push(`${error}; this blocks later create, resume, and inspect, not this diagnostic`);
   if (!binding) notes.push("no account binding is configured; copy a profileId from this output before bind-account");
   else {
-    if (binding.labelLikeProfileId === true) notes.push("configured profileId looks like a display label and was not sent to Ego");
+    if (binding.labelLikeProfileId === true) notes.push("configured profileId matches a display-label pattern. Discovery does not send it to Ego. A later create accepts that exact id only when profiles() lists it; the name field is not a substitute.");
     if (/^PASTE_|^placeholder$/i.test(binding.profileId)) notes.push("configured profileId is still a placeholder and was not sent to Ego");
     notes.push("configured display name and account id were not compared with a page");
   }
