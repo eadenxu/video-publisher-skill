@@ -26,7 +26,9 @@ const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cove
 export function parsePublisherArgs(argv, context) {
   const { loadConfig, PLATFORMS, UsageError, positive, defaultStateRoot } = context;
   const cleanupOnly = argv.includes("--cleanup-only");
-  const config = loadConfig({ requireOnboarded: !cleanupOnly });
+  const operationIndex = argv.indexOf("--operation");
+  const metadataDiagnosis = operationIndex >= 0 && argv[operationIndex + 1] === "diagnose-binding";
+  const config = loadConfig({ requireOnboarded: !cleanupOnly && !metadataDiagnosis });
   const options = {
     inspectOnly: false,
     operation: "auto",
@@ -100,7 +102,7 @@ export function parsePublisherArgs(argv, context) {
   if (!options.packagePath && positional.length && cleanupOnly && positional[0].endsWith(".json")) {
     options.packagePath = path.resolve(positional.shift());
   }
-  if (!options.packagePath && !cleanupOnly) {
+  if (!options.packagePath && !cleanupOnly && options.operation !== "diagnose-binding") {
     throw new UsageError("Usage: run-safe-platforms.sh <package.json> [task-suffix] [platform...] [--package|--platform|--task-suffix|--job-id|--fresh-space|--reuse-space|--close-on-complete|--cleanup-only]");
   }
   if (!options.taskSuffix && positional.length && !PLATFORMS.includes(positional[0])) {
@@ -109,7 +111,7 @@ export function parsePublisherArgs(argv, context) {
   if (!options.taskSuffix) options.taskSuffix = "manual";
   const selected = [...new Set(platforms.length ? platforms : positional.length ? positional : (cleanupOnly ? [] : config.defaultPlatforms))];
   if (selected.some(platform => !PLATFORMS.includes(platform))) throw new UsageError("Unsupported platform argument");
-  if (!cleanupOnly) {
+  if (!cleanupOnly && options.operation !== "diagnose-binding") {
     const unavailablePlatforms = selected.filter(platform => !(config.availablePlatforms || []).includes(platform));
     if (unavailablePlatforms.length) {
       throw new UsageError(`Platform is not configured as available: ${unavailablePlatforms.join(", ")}. Update Video Publisher onboarding before browser work.`);

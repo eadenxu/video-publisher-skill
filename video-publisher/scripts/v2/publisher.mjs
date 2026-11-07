@@ -12,7 +12,7 @@ import {
   validateXiaohongshuPackage,
   validateYoutubePackage,
 } from "../lib/content-package.mjs";
-import { loadConfig } from "../lib/config.mjs";
+import { configStatus, loadConfig } from "../lib/config.mjs";
 import { inspectMediaFile, validateMediaForPlatform } from "../lib/media.mjs";
 import { buildIdentity } from "./lib/identity.mjs";
 import { acquireJobLock, JobBusyError, resolvePublisherLockDirectory } from "./lib/job-lock.mjs";
@@ -30,7 +30,14 @@ import {
   runEgoScript,
   shouldRotateSpaces,
 } from "./lib/spaces.mjs";
-import { bindingDiagnosticScript, sameAccountBinding, sanitizeDiagnostic } from "./lib/account-binding.mjs";
+import {
+  bindingDiagnosticScript,
+  describeProfileInventory,
+  describeSpaceInventory,
+  explainDiscoveryConfig,
+  sameAccountBinding,
+  sanitizeDiagnostic,
+} from "./lib/account-binding.mjs";
 import { evaluatePlatformDedup, normalizeXhsRequirements } from "./lib/xhs-fields.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -224,16 +231,27 @@ async function runBindingDiagnostic() {
   }
   try {
     const payload = JSON.parse(match[1]);
+    const profiles = sanitizeDiagnostic(payload.profiles);
+    const spaces = sanitizeDiagnostic(payload.spaces);
     return {
       ok: true,
       captured: true,
       accepted: false,
+      accountVerified: false,
+      ready: false,
       liveVerified: false,
       livePageAcceptance: "pending",
+      defaultProfileChanged: false,
       pageOpened: payload.pageOpened === true,
       taskSpaceCalled: payload.taskSpaceCalled === true,
-      profiles: sanitizeDiagnostic(payload.profiles),
-      spaces: sanitizeDiagnostic(payload.spaces),
+      spaceCreated: false,
+      spaceSwitched: false,
+      spaceClosed: false,
+      uploadPerformed: false,
+      profiles,
+      spaces,
+      profileInventory: describeProfileInventory(profiles),
+      spaceInventory: describeSpaceInventory(spaces),
     };
   } catch (error) {
     return { ok: false, captured: false, accepted: false, liveVerified: false, error: `diagnostic payload was not JSON: ${String(error?.message || error)}` };
@@ -246,8 +264,58 @@ async function persistKeepSpace(store, state, args, closeCurrent) {
   await store.save();
 }
 
+async function runMetadataOnlyBindingDiagnosis(args) {
+  const status = configStatus();
+  const release = acquireJobLock(resolvePublisherLockDirectory(), {
+    jobId: "diagnose-binding",
+    packagePath: "",
+    scope: "publisher",
+  });
+  let diagnostic;
+  try {
+    diagnostic = await runBindingDiagnostic();
+  } finally {
+    release();
+  }
+  const summary = {
+    schemaVersion: 4,
+    operation: "diagnose-binding",
+    ready: false,
+    accepted: false,
+    accountVerified: false,
+    finalPublishAuthorized: false,
+    scheduleAuthorizesFinalPublish: false,
+    defaultProfileChanged: false,
+    stateWritten: false,
+    pathsWritten: [],
+    package: {
+      supplied: Boolean(args.packagePath),
+      read: false,
+      mediaPreflight: "not-run",
+      note: args.packagePath
+        ? "The package path was ignored. This diagnostic does not open video or cover files and does not write a job."
+        : "No package is required.",
+    },
+    config: explainDiscoveryConfig({
+      exists: status.exists,
+      onboardingRequired: status.onboardingRequired,
+      errors: status.errors,
+      warnings: status.warnings,
+      binding: args.accountBinding,
+    }),
+    stateRootSupplied: process.argv.includes("--state-root"),
+    diagnostic,
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  if (diagnostic.captured !== true) process.exitCode = 10;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.diagnosis === "diagnose-binding") {
+    await runMetadataOnlyBindingDiagnosis(args);
+    return;
+  }
   if (args.cleanupOnly) {
     let state = { jobId: args.jobId || "", platforms: {}, retiredSpaces: [] };
     let statePath = "";
@@ -399,12 +467,10 @@ async function main() {
     };
   }
   if (args.diagnosis) {
-    if (args.diagnosis === "diagnose-binding" && (args.platforms.length !== 1 || args.platforms[0] !== "xiaohongshu")) {
-      throw new UsageError("diagnose-binding supports only --platforms xiaohongshu");
+    if (args.diagnosis !== "diagnose-dedup") {
+      throw new UsageError("diagnose-binding does not create job state");
     }
-    const diagnostic = args.diagnosis === "diagnose-binding"
-      ? await runBindingDiagnostic()
-      : {
+    const diagnostic = {
         ok: false,
         accepted: false,
         liveVerified: false,

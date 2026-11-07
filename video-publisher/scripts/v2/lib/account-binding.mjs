@@ -304,6 +304,66 @@ export function sanitizeDiagnostic(value, depth = 0) {
   return String(value).slice(0, 180);
 }
 
+export function describeProfileInventory(payload) {
+  const extracted = extractProfileRecords(payload);
+  return {
+    shape: extracted.shape,
+    observedKeys: extracted.keys,
+    profiles: extracted.records.map(record => {
+      const label = record.label || "";
+      return {
+        profileId: record.profileId,
+        label,
+        idEqualsLabel: Boolean(label) && record.profileId === label,
+        idLooksLikeDisplayLabel: LABEL_LIKE_PROFILE_ID.test(record.profileId),
+        bindUsing: "profileId",
+        doNotBindUsing: label ? "label" : "",
+      };
+    }),
+    accountVerified: false,
+    ready: false,
+  };
+}
+
+export function describeSpaceInventory(payload) {
+  const extracted = extractSpaceRecords(payload);
+  return {
+    observedKeys: extracted.keys,
+    spaces: extracted.records.map(record => ({
+      id: record.id,
+      name: record.name,
+      profileId: record.profileId,
+      profileIdFieldPresent: record.profileFieldPresent,
+      nameIsNotProfileId: true,
+    })),
+    created: false,
+    opened: false,
+    switched: false,
+    closed: false,
+  };
+}
+
+export function explainDiscoveryConfig({ exists = false, onboardingRequired = false, errors = [], warnings = [], binding = null } = {}) {
+  const notes = [];
+  if (!exists) notes.push("no completed config is required for profile discovery, and this command does not write one");
+  for (const warning of warnings) notes.push(`${warning}; not required for profile discovery`);
+  for (const error of errors) notes.push(`${error}; this blocks later create, resume, and inspect, not this diagnostic`);
+  if (!binding) notes.push("no account binding is configured; copy a profileId from this output before bind-account");
+  else {
+    if (binding.labelLikeProfileId === true) notes.push("configured profileId looks like a display label and was not sent to Ego");
+    if (/^PASTE_|^placeholder$/i.test(binding.profileId)) notes.push("configured profileId is still a placeholder and was not sent to Ego");
+    notes.push("configured display name and account id were not compared with a page");
+  }
+  return {
+    configPresent: exists === true,
+    onboardingRequired: onboardingRequired === true,
+    bindingConfigured: Boolean(binding),
+    bindingUsed: false,
+    blocksThisDiagnostic: false,
+    notes,
+  };
+}
+
 export function sameAccountBinding(left, right) {
   if (!left || !right) return false;
   return left.profileId === right.profileId

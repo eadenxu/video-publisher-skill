@@ -110,23 +110,23 @@ These commands are the only maintained entry. They do not change Ego's global de
 
 `profileId` must be an id returned by `profiles()`. A human label such as `Profile 2` is not sent as that id. `taskSpace(name, { profileId })` applies the id only when creating a space. Resume calls `taskSpace(id)` without `profileId` and refuses to open the page unless `listTaskSpaces()` shows that same id on the existing space. A matching space name is not proof of the profile. Create, resume, and inspect each read the live account again; a mismatch or an unproven identity stops before upload.
 
+Discover profile ids before any package, video, cover, source directory, or account binding exists. This command does not read those files and does not write a job, config, or media path. Exit 0 means the two read-only calls returned; `ready`, `accepted`, and `accountVerified` stay false. A `profileId` is the id field. A label such as `Profile 2` is reported separately and is not the id. The global default profile is not changed.
+
+```bash
+node scripts/v2/publisher.mjs --operation diagnose-binding
+```
+
+`scripts/run-safe-platforms.sh --operation diagnose-binding` is the same entry. Do not pass a placeholder package. `--package`, `--job-id`, and `--state-root` are ignored and not written. The command only calls `profiles()` and `listTaskSpaces()`. It does not create, open, switch, or close a space, and it does not open a page or upload. Copy the returned `profileId`, not the label, into the private config:
+
 ```bash
 node scripts/config.mjs bind-account xiaohongshu \
   --profile-id "PASTE_PROFILE_ID_FROM_DIAGNOSE_BINDING" \
   --profile-label "PASTE_HUMAN_LABEL_NOT_USED_AS_ID" \
   --display-name "PASTE_ACCOUNT_DISPLAY_NAME" \
   --account-id "PASTE_ACCOUNT_ID"
-
-scripts/run-safe-platforms.sh \
-  --package /absolute/package.json \
-  --platforms xiaohongshu \
-  --job-id SAME-JOB \
-  --state-root /absolute/state-root \
-  --operation diagnose-binding \
-  --no-cleanup-stale-spaces
 ```
 
-`diagnose-binding` only calls `profiles()` and `listTaskSpaces()`. It does not create a space or open a page. Its stdout is not live acceptance. Copy the real `profileId` into the private config, then prepare:
+Create, resume, and inspect still require a real package, existing media, and a validated config. Then prepare:
 
 ```bash
 scripts/run-safe-platforms.sh \

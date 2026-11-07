@@ -91,7 +91,7 @@ node scripts/config.mjs bind-account xiaohongshu \
   --account-id "PASTE_ACCOUNT_ID"
 ```
 
-先跑 `references/scripts.md` 里的 `--operation diagnose-binding`，再把诊断结果中的 id 填进来。若 `profileId` 看起来像 `Profile 2` 这种标签，运行时仍只在 `profiles()` 列出完全相同的字符串时接受它，不能靠标签猜。未配置绑定时，原有平台行为不变。配错或页面身份对不上时，创建、恢复和 inspect 都会在上传前停止。
+先跑 `node scripts/v2/publisher.mjs --operation diagnose-binding`。它不需要视频、封面、内容包、已存在的 sourceDirectory，也不需要先完成绑定。`config validate` 仍会因不存在的 sourceDirectory 失败，那只挡住后续发布，不挡住这次只读发现。诊断输出里的 `profileId` 才是要粘贴的 id；`label` 即使写成 `Profile 2` 也不是 id。诊断结果不是账号已验证，也不是 READY。未配置绑定时，原有平台行为不变。配错或页面身份对不上时，创建、恢复和 inspect 都会在上传前停止。
 
 ## 新增平台
 

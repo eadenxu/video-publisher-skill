@@ -86,6 +86,13 @@ test("space-name cannot cover more than one platform", () => {
   );
 });
 
+test("profile discovery does not require a package", () => {
+  const args = parse(["--operation", "diagnose-binding"]);
+  assert.equal(args.diagnosis, "diagnose-binding");
+  assert.equal(args.packagePath, "");
+  assert.equal(args.inspectOnly, true);
+});
+
 test("explicit operations guard cover replacement and repost", () => {
   const replace = parse(["--package", "/tmp/pkg.json", "--job-id", "ready-job", "--replace-cover"]);
   assert.equal(replace.operation, "replace-cover");
