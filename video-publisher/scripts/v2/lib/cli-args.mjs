@@ -34,7 +34,7 @@ const VALUE_FLAGS = new Set([
   "--maintenance-root",
 ]);
 
-const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost", "diagnose-binding", "diagnose-dedup", "maintenance-diagnose"]);
+const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost", "diagnose-binding", "diagnose-dedup", "maintenance-diagnose", "maintenance-space-status"]);
 
 export function parsePublisherArgs(argv, context) {
   const { loadConfig, PLATFORMS, UsageError, positive, defaultStateRoot } = context;
@@ -130,7 +130,8 @@ export function parsePublisherArgs(argv, context) {
   if (!options.packagePath && positional.length && cleanupOnly && positional[0].endsWith(".json")) {
     options.packagePath = path.resolve(positional.shift());
   }
-  const maintenance = options.operation === "maintenance-diagnose";
+  const maintenanceStatus = options.operation === "maintenance-space-status";
+  const maintenance = options.operation === "maintenance-diagnose" || maintenanceStatus;
   if (!options.packagePath && !cleanupOnly && options.operation !== "diagnose-binding" && !maintenance) {
     throw new UsageError("Usage: run-safe-platforms.sh <package.json> [task-suffix] [platform...] [--package|--platform|--task-suffix|--job-id|--fresh-space|--reuse-space|--close-on-complete|--cleanup-only]");
   }
@@ -169,12 +170,15 @@ export function parsePublisherArgs(argv, context) {
     throw new UsageError("This config purpose is maintenance-account-observation and productionReady is false. Refusing create, resume, inspect, diagnose-binding, cleanup, and every other production command.");
   }
   if (maintenance) {
-    options.diagnosis = "maintenance-diagnose";
+    options.diagnosis = maintenanceStatus ? "maintenance-space-status" : "maintenance-diagnose";
     options.inspectOnly = true;
     options.freshSpace = false;
     options.cleanupStaleSpaces = false;
+    if (maintenanceStatus && options.closeMaintenanceSpace) {
+      throw new UsageError("maintenance-space-status only reads listTaskSpaces for one exact name. It does not close a space and does not accept --close-maintenance-space.");
+    }
     if (config.purpose !== MAINTENANCE_CONFIG_PURPOSE) {
-      throw new UsageError("maintenance-diagnose requires purpose maintenance-account-observation. Create it with: node scripts/config.mjs init-maintenance-account. A production config is refused before Ego.");
+      throw new UsageError("maintenance commands require purpose maintenance-account-observation. Create it with: node scripts/config.mjs init-maintenance-account. A production config is refused before Ego.");
     }
     const maintenanceErrors = validateMaintenanceConfig({ ...config, unknownKeys: [] });
     if (maintenanceErrors.length) {
@@ -185,9 +189,9 @@ export function parsePublisherArgs(argv, context) {
     if (!options.maintenanceDisplayName) missing.push("--display-name");
     if (!options.maintenanceAccountId) missing.push("--account-id");
     if (!options.maintenanceSpaceName) missing.push("--maintenance-space-name");
-    if (!options.maintenanceRoot) missing.push("--maintenance-root");
-    if (missing.length) throw new UsageError(`maintenance-diagnose requires ${missing.join(", ")}`);
-    if (options.maintenanceRoot === defaultStateRoot || (options.stateRoot && options.maintenanceRoot === options.stateRoot)) {
+    if (!maintenanceStatus && !options.maintenanceRoot) missing.push("--maintenance-root");
+    if (missing.length) throw new UsageError(`${options.operation} requires ${missing.join(", ")}`);
+    if (!maintenanceStatus && (options.maintenanceRoot === defaultStateRoot || (options.stateRoot && options.maintenanceRoot === options.stateRoot))) {
       throw new UsageError("--maintenance-root must be separate from production job state");
     }
     const requested = {

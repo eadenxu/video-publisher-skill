@@ -144,6 +144,10 @@ node scripts/v2/publisher.mjs \
 
 `--close-maintenance-space` finishes only the handle created in that same process, and only when its name matches. It does not scan or close other spaces. Omit it to keep the new space. Do not point `--maintenance-root` at the production job directory. The CLI identity must match the maintenance file; this command does not fill a missing account from the shell.
 
+The script logs `VIDEO_PUBLISHER_MAINTENANCE:` and writes `<maintenance-root>/<maintenance-space-name>.checkpoint.json` before `finish`. `closeResult.closed` is true only when `finish` returns. If that return is lost, close stays `unknown`; it is not reported as success. A missing marker leaves `sideEffects`, space id, home identity, and note-manager as `unknown`, even when the screenshot files exist. Those files are recorded under `screenshotFilesPresent` and do not set `homeIdentityMatched`. The raw child stdout and stderr are saved only by this version, at `<maintenance-root>/<maintenance-space-name>.ego.log`, with `exitCode`, `----- stdout -----`, and `----- stderr -----`. The 585fe53 run did not write that log or a checkpoint; its retained output is the publisher JSON and the two screenshots.
+
+`maintenance-space-status` calls `profiles()` and `listTaskSpaces()` and prints only the exact `--maintenance-space-name`. It does not call `taskSpace`, open a page, or finish. `found: false` means that snapshot did not contain the name. It does not prove the earlier finish succeeded. `found: true` returns `spaceId` when the list has it and does not claim or close the space. There is no supported no-claim close: `taskSpace(name)` is reuse-or-create, so it can resume or create. Do not use it to clean up `vp-maint-account-check-585fe53-20261108-1201` unless a later authorization accepts that side effect.
+
 ```bash
 node scripts/config.mjs bind-account xiaohongshu \
   --profile-id "PASTE_PROFILE_ID_FROM_DIAGNOSE_BINDING" \

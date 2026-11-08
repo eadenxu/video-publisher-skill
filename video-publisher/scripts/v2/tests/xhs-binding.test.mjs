@@ -14,8 +14,11 @@ import {
   describeSpaceInventory,
   explainDiscoveryConfig,
   assertMaintenanceScript,
+  assertMaintenanceSpaceStatusScript,
   buildMaintenanceDiagnoseScript,
+  buildMaintenanceSpaceStatusScript,
   evaluateHomeIdentity,
+  parseMaintenanceOutput,
   summarizeManagerText,
   extractProfileRecords,
   extractSpaceRecords,
@@ -808,6 +811,11 @@ test("maintenance diagnose writes only its own root and does not open the publis
   assert.equal(record.publishable, false);
   assert.equal(record.homeIdentityMatched, true);
   assert.equal(record.publishUrlOpened, false);
+  assert.equal(record.spaceId, "synthetic-maint-1");
+  assert.equal(record.sideEffects, "reported");
+  assert.equal(record.closeResult.closed, false);
+  assert.equal(record.closeResult.reason, "kept");
+  assert.equal(fs.existsSync(path.join(maintenanceRoot, "vp-maint-example.ego.log")), true);
   await fs.promises.rm(root, { recursive: true, force: true });
 });
 
@@ -920,4 +928,181 @@ test("maintenance diagnose rejects a production config and an identity mismatch 
   assert.doesNotMatch(`${create.stderr}\n${create.stdout}`, /video file not found|Package JSON not found|sourceDirectory/);
   assert.equal(fs.existsSync(marker), false);
   await fs.promises.rm(root, { recursive: true, force: true });
+});
+
+test("maintenance output keeps unknown side effects when the marker is missing or wrapped", () => {
+  const missing = parseMaintenanceOutput("");
+  assert.equal(missing.error, "maintenance marker missing");
+  assert.equal(missing.payload.sideEffects, "unknown");
+  assert.equal(missing.payload.created, null);
+  assert.equal(missing.payload.homeIdentityMatched, null);
+  assert.equal(missing.payload.closeResult.closed, null);
+  const wrapped = parseMaintenanceOutput("ego: VIDEO_PUBLISHER_MAINTENANCE:\n{\"created\":true,\"spaceId\":\"space-9\",\"homeIdentityMatched\":true,\"closeResult\":{\"closed\":null,\"reason\":\"pending\"}}\n");
+  assert.equal(wrapped.ok, true);
+  assert.equal(wrapped.payload.spaceId, "space-9");
+  assert.equal(wrapped.payload.homeIdentityMatched, true);
+  const broken = parseMaintenanceOutput("VIDEO_PUBLISHER_MAINTENANCE:{");
+  assert.equal(broken.ok, false);
+  assert.match(broken.error, /not JSON/);
+  assert.equal(broken.payload.sideEffects, "unknown");
+  const both = parseMaintenanceOutput([
+    "VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ created: true, spaceId: "space-9", homeIdentityMatched: true, closeResult: { closed: null, reason: "pending" } }),
+    "VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ created: true, spaceId: "space-9", closeResult: { closed: false, reason: "finish-threw", error: "finish failed" } }),
+  ].join("\n"));
+  assert.equal(both.payload.spaceId, "space-9");
+  assert.equal(both.payload.closeResult.closed, false);
+  assert.equal(both.payload.closeResult.reason, "finish-threw");
+});
+
+test("maintenance diagnose does not turn screenshots or a lost finish into verified facts", async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "video-publisher-maintenance-marker-"));
+  const maintenanceRoot = path.join(root, "state");
+  const configPath = path.join(root, "config.json");
+  const calls = path.join(root, "calls");
+  const fakeEgoPath = path.join(root, "fake-ego.mjs");
+  writeMaintenanceConfig(maintenanceAccountFile({
+    profileId: "Profile 2",
+    profileLabel: "AI",
+    displayName: "Example Creator",
+    accountId: "1000000001",
+  }), configPath);
+  await fs.promises.writeFile(fakeEgoPath, `
+    import fs from "node:fs";
+    let script = "";
+    for await (const chunk of process.stdin) script += chunk;
+    fs.appendFileSync(process.env.CALLS, "1");
+    const mode = process.env.MODE;
+    const home = script.match(/"home":"([^"]+)"/)[1];
+    const notes = script.match(/"noteManager":"([^"]+)"/)[1];
+    fs.mkdirSync(home.slice(0, home.lastIndexOf("/")), { recursive: true });
+    fs.writeFileSync(home, "home");
+    fs.writeFileSync(notes, "notes");
+    if (mode === "checkpoint") {
+      const runId = script.match(/"runId":"([^"]+)"/)[1];
+      const checkpoint = script.match(/"checkpointPath":"([^"]+)"/)[1];
+      fs.writeFileSync(checkpoint, JSON.stringify({
+        runId,
+        sideEffects: "reported",
+        created: true,
+        spaceId: "space-from-checkpoint",
+        homeOpened: true,
+        homeIdentityMatched: true,
+        noteManagerOpened: true,
+        publishUrlOpened: false,
+        retried: false,
+        finalGuardReleaseCalled: false,
+        closeResult: { closed: null, reason: "pending" },
+      }));
+    } else if (mode === "pending") {
+      console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({
+        sideEffects: "reported",
+        created: true,
+        spaceId: "space-pending",
+        homeOpened: true,
+        homeIdentityMatched: true,
+        noteManagerOpened: true,
+        publishUrlOpened: false,
+        retried: false,
+        finalGuardReleaseCalled: false,
+        closeResult: { closed: null, reason: "pending" },
+      }));
+    } else if (mode === "finish-threw") {
+      console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({
+        created: true,
+        spaceId: "space-threw",
+        homeIdentityMatched: true,
+        noteManagerOpened: true,
+        publishUrlOpened: false,
+        retried: false,
+        finalGuardReleaseCalled: false,
+        closeResult: { closed: false, reason: "finish-threw", error: "finish failed" },
+      }));
+    }
+  `);
+  const args = [
+    path.join(V2_DIR, "publisher.mjs"),
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--profile-label", "AI",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-marker",
+    "--maintenance-root", maintenanceRoot,
+    "--close-maintenance-space",
+  ];
+  const envFor = (mode) => ({
+    ...process.env,
+    VIDEO_PUBLISHER_CONFIG: configPath,
+    VIDEO_PUBLISHER_V2_EGO_COMMAND: fakeEgoPath,
+    VIDEO_PUBLISHER_V2_LOCK_ROOT: path.join(root, `locks-${mode}`),
+    CALLS: calls,
+    MODE: mode,
+  });
+  await fs.promises.writeFile(calls, "");
+  const silent = await run(process.execPath, args, { env: envFor("silent") });
+  assert.equal(silent.code, 10);
+  const silentBody = JSON.parse(silent.stdout);
+  assert.equal(silentBody.sideEffects, "unknown");
+  assert.equal(silentBody.createsOwnSpace, "unknown");
+  assert.equal(silentBody.homeIdentityMatched, "unknown");
+  assert.equal(silentBody.noteManagerOpened, "unknown");
+  assert.equal(silentBody.spaceIdState, "unknown");
+  assert.equal(silentBody.closeResult.closed, "unknown");
+  assert.equal(silentBody.screenshotFilesPresent.home, true);
+  assert.equal(silentBody.screenshotFilesPresent.notes, true);
+  assert.equal(silentBody.publisherRetried, false);
+  assert.equal(fs.readFileSync(calls, "utf8"), "1");
+  assert.match(fs.readFileSync(silentBody.egoOutput.path, "utf8"), /----- stdout -----/);
+  const pending = await run(process.execPath, args, { env: envFor("pending") });
+  const pendingBody = JSON.parse(pending.stdout);
+  assert.equal(pending.code, 10);
+  assert.equal(pendingBody.spaceId, "space-pending");
+  assert.equal(pendingBody.homeIdentityMatched, true);
+  assert.equal(pendingBody.closeResult.closed, "unknown");
+  assert.equal(pendingBody.closeResult.reason, "pending");
+  const threw = await run(process.execPath, args, { env: envFor("finish-threw") });
+  const threwBody = JSON.parse(threw.stdout);
+  assert.equal(threw.code, 10);
+  assert.equal(threwBody.spaceId, "space-threw");
+  assert.equal(threwBody.closeResult.closed, false);
+  assert.equal(threwBody.closeResult.reason, "finish-threw");
+  const checkpoint = await run(process.execPath, args, { env: envFor("checkpoint") });
+  const checkpointBody = JSON.parse(checkpoint.stdout);
+  assert.equal(checkpoint.code, 10);
+  assert.equal(checkpointBody.evidenceSource, "checkpoint");
+  assert.equal(checkpointBody.spaceId, "space-from-checkpoint");
+  assert.equal(checkpointBody.homeIdentityMatched, true);
+  assert.equal(checkpointBody.closeResult.closed, "unknown");
+  assert.equal(fs.readFileSync(calls, "utf8"), "1111");
+  await fs.promises.rm(root, { recursive: true, force: true });
+});
+
+test("maintenance space status reports one exact name and does not claim it", async () => {
+  const script = buildMaintenanceSpaceStatusScript({
+    spaceName: "vp-maint-account-check-585fe53-20261108-1201",
+    profileId: "Profile 2",
+  });
+  assertMaintenanceSpaceStatusScript(script);
+  const harness = (spaces) => `
+    globalThis.profiles = async () => [{ id: "Profile 2", name: "AI", isDefault: false }, { id: "Profile 3", name: "child", isDefault: true }];
+    globalThis.listTaskSpaces = async () => (${JSON.stringify(spaces)});
+    ${script}
+  `;
+  const present = await run(process.execPath, ["--input-type=module", "--eval", harness([
+    { id: 104, name: "小红书-只读查重", ownership: "user" },
+    { id: 200, name: "vp-maint-account-check-585fe53-20261108-1201", ownership: "agent" },
+  ])]);
+  assert.equal(present.code, 0, present.stderr);
+  const presentBody = JSON.parse(present.stdout.slice(present.stdout.indexOf("{")));
+  assert.equal(presentBody.found, true);
+  assert.equal(presentBody.spaceId, 200);
+  assert.equal(presentBody.closeConfirmed, false);
+  assert.equal(presentBody.taskSpaceCalled, false);
+  assert.equal(present.stdout.includes("Profile 3"), false);
+  assert.equal(present.stdout.includes("小红书-只读查重"), false);
+  const absent = await run(process.execPath, ["--input-type=module", "--eval", harness([])]);
+  const absentBody = JSON.parse(absent.stdout.slice(absent.stdout.indexOf("{")));
+  assert.equal(absentBody.found, false);
+  assert.equal(absentBody.closeConfirmed, false);
+  assert.equal(absentBody.spaceId, null);
 });

@@ -535,6 +535,14 @@ export function assertMaintenanceScript(script) {
   if (!(homeGoto >= 0 && gateAt > homeGoto && managerGoto > gateAt)) {
     throw new Error("note-manager navigation must follow the home identity gate");
   }
+  const finishAt = script.indexOf("await handle.finish");
+  const factAt = script.indexOf("VIDEO_PUBLISHER_MAINTENANCE:");
+  if (!(factAt >= 0 && finishAt > factAt)) {
+    throw new Error("maintenance facts must be logged before finish");
+  }
+  if (!script.includes("\"pending\"")) {
+    throw new Error("close must stay pending until finish returns");
+  }
 }
 
 export function buildMaintenanceDiagnoseScript(input) {
@@ -608,15 +616,12 @@ if (!plan.create) {
         pageError = String(error && error.message || error);
       }
     }
-    let closeResult = { closed: false, reason: input.closeAfter ? "not-closed" : "kept" };
-    if (ownHandle && input.closeAfter === true && !pageError) {
-      if (typeof handle.finish !== "function") closeResult = { closed: false, reason: "finish-not-on-handle" };
-      else {
-        await handle.finish({ keep: false });
-        closeResult = { closed: true, keep: false };
-      }
-    }
-    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({
+    const closeResult = !ownHandle
+      ? { closed: false, reason: "not-own-handle" }
+      : pageError
+        ? { closed: false, reason: "page-error" }
+        : { closed: null, reason: input.closeAfter ? "pending" : "kept" };
+    const snapshot = {
       ...base,
       taskSpaceCalled: true,
       created: ownHandle,
@@ -631,23 +636,220 @@ if (!plan.create) {
       pageError,
       closeResult,
       callError,
-    }));
+      sideEffects: "reported",
+    };
+    await emitMaintenance(snapshot);
+    if (ownHandle && input.closeAfter === true && !pageError) {
+      try {
+        if (typeof handle.finish !== "function") snapshot.closeResult = { closed: false, reason: "finish-not-on-handle" };
+        else {
+          await handle.finish({ keep: false });
+          snapshot.closeResult = { closed: true, keep: false, reason: "finish-returned" };
+        }
+      } catch (error) {
+        snapshot.closeResult = { closed: false, reason: "finish-threw", error: String(error && error.message || error) };
+      }
+      await emitMaintenance(snapshot);
+    }
   }
 }
 `;
-  const script = `${runner}`;
-  return script;
+  const helpers = `
+function maintenanceJson(state) {
+  return JSON.stringify({ runId: input.runId, ...state });
+}
+async function emitMaintenance(state) {
+  const body = maintenanceJson(state);
+  console.log("VIDEO_PUBLISHER_MAINTENANCE:" + body);
+  if (!input.checkpointPath) return;
+  try {
+    const fs = await import("node:fs");
+    fs.writeFileSync(input.checkpointPath, body + "\\n", { mode: 0o600 });
+  } catch (error) {
+    console.log("VIDEO_PUBLISHER_MAINTENANCE_CHECKPOINT_ERROR:" + JSON.stringify(String(error && error.message || error)));
+  }
+}
+`;
+  return `${helpers}${runner}`;
+}
+
+const MAINTENANCE_MARKER = "VIDEO_PUBLISHER_MAINTENANCE:";
+
+export function unknownMaintenanceObservation() {
+  return {
+    sideEffects: "unknown",
+    created: null,
+    homeOpened: null,
+    homeIdentityMatched: null,
+    noteManagerOpened: null,
+    spaceId: null,
+    spaceName: null,
+    closeResult: { closed: null, reason: "unknown" },
+    publishUrlOpened: null,
+    retried: null,
+    finalGuardReleaseCalled: null,
+    controls: null,
+  };
+}
+
+function parseJsonValue(source, index) {
+  let start = index;
+  while (start < source.length && /\s/.test(source[start])) start += 1;
+  if (source[start] !== "{") return { ok: false, error: "maintenance payload was not JSON" };
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let cursor = start; cursor < source.length; cursor += 1) {
+    const ch = source[cursor];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === "\"") inString = false;
+      continue;
+    }
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const raw = source.slice(start, cursor + 1);
+        try {
+          return { ok: true, value: JSON.parse(raw), end: cursor + 1 };
+        } catch (error) {
+          return { ok: false, error: `maintenance payload was not JSON: ${String(error?.message || error)}` };
+        }
+      }
+    }
+  }
+  return { ok: false, error: "maintenance payload was not JSON" };
 }
 
 export function parseMaintenanceOutput(text) {
-  const line = String(text || "").split(/\r?\n/).find(item => item.includes("VIDEO_PUBLISHER_MAINTENANCE:"));
-  if (!line) return { ok: false, error: "maintenance marker missing" };
-  const raw = line.slice(line.indexOf("VIDEO_PUBLISHER_MAINTENANCE:") + "VIDEO_PUBLISHER_MAINTENANCE:".length);
-  try {
-    return { ok: true, payload: JSON.parse(raw) };
-  } catch (error) {
-    return { ok: false, error: `maintenance payload was not JSON: ${String(error?.message || error)}` };
+  const source = String(text || "");
+  const events = [];
+  let broken = "";
+  let search = 0;
+  while (search < source.length) {
+    const at = source.indexOf(MAINTENANCE_MARKER, search);
+    if (at < 0) break;
+    const parsed = parseJsonValue(source, at + MAINTENANCE_MARKER.length);
+    if (!parsed.ok) {
+      broken = parsed.error;
+      break;
+    }
+    if (parsed.value && typeof parsed.value === "object" && !Array.isArray(parsed.value)) events.push(parsed.value);
+    search = parsed.end;
   }
+  if (!events.length) {
+    return {
+      ok: false,
+      error: broken || "maintenance marker missing",
+      payload: unknownMaintenanceObservation(),
+    };
+  }
+  const payload = events.reduce((merged, event) => ({ ...merged, ...event }), {});
+  payload.markerCount = events.length;
+  if (broken) payload.trailingMarkerIncomplete = true;
+  if (!payload.sideEffects) payload.sideEffects = "reported";
+  return { ok: !broken, error: broken, payload };
+}
+
+export function buildMaintenanceSpaceStatusScript(input) {
+  return `
+const targetName = ${JSON.stringify(input.spaceName)};
+const targetProfileId = ${JSON.stringify(input.profileId)};
+const profilesPayload = await profiles();
+const spacesPayload = await listTaskSpaces();
+const profileIds = [];
+const walk = (node, depth) => {
+  if (!node || depth > 6) return;
+  if (Array.isArray(node)) {
+    node.slice(0, 80).forEach(item => walk(item, depth + 1));
+    return;
+  }
+  if (typeof node !== "object") return;
+  if (typeof node.id === "string" && node.id.trim()) profileIds.push(node.id.trim());
+  for (const value of Object.values(node)) {
+    if (value && typeof value === "object") walk(value, depth + 1);
+  }
+};
+walk(profilesPayload, 0);
+const matches = [];
+const visitSpace = (node, depth) => {
+  if (!node || depth > 6) return;
+  if (Array.isArray(node)) {
+    node.slice(0, 80).forEach(item => visitSpace(item, depth + 1));
+    return;
+  }
+  if (typeof node !== "object") return;
+  if (typeof node.id === "string" && typeof node.name === "string" && typeof node.isDefault === "boolean") return;
+  if (node.name != null && String(node.name) === targetName) {
+    const spaceId = node.spaceId != null ? node.spaceId : (node.id != null ? node.id : null);
+    matches.push({
+      spaceId,
+      ownership: Object.prototype.hasOwnProperty.call(node, "ownership") && node.ownership != null ? String(node.ownership) : null,
+      ownershipKnown: Object.prototype.hasOwnProperty.call(node, "ownership"),
+      profileId: Object.prototype.hasOwnProperty.call(node, "profileId") && node.profileId != null ? String(node.profileId) : null,
+      profileKnown: Object.prototype.hasOwnProperty.call(node, "profileId"),
+    });
+  }
+  for (const value of Object.values(node)) {
+    if (value && typeof value === "object") visitSpace(value, depth + 1);
+  }
+};
+visitSpace(spacesPayload, 0);
+const unique = [];
+const seen = new Set();
+for (const match of matches) {
+  const key = String(match.spaceId) + "::" + String(match.ownership);
+  if (seen.has(key)) continue;
+  seen.add(key);
+  unique.push(match);
+}
+const one = unique.length === 1 ? unique[0] : null;
+const listUsable = Array.isArray(spacesPayload) || (spacesPayload && typeof spacesPayload === "object");
+console.log("VIDEO_PUBLISHER_MAINTENANCE_STATUS:" + JSON.stringify({
+  taskSpaceCalled: false,
+  pageOpened: false,
+  finishCalled: false,
+  closeConfirmed: false,
+  inventoryAccessed: ["profiles", "listTaskSpaces"],
+  otherSpacesHidden: true,
+  otherProfilesHidden: true,
+  targetProfileListed: profileIds.includes(targetProfileId),
+  listUsable: Boolean(listUsable),
+  found: listUsable ? unique.length === 1 : null,
+  ambiguous: unique.length > 1,
+  matchCount: unique.length,
+  spaceId: one ? one.spaceId : null,
+  ownership: one && one.ownershipKnown ? one.ownership : null,
+  ownershipKnown: Boolean(one && one.ownershipKnown),
+  profileIdMatches: one && one.profileKnown ? one.profileId === targetProfileId : null,
+  meaning: "Inventory match for one exact name. Absence does not prove finish succeeded. Presence does not claim, resume, or close the space.",
+}));
+`;
+}
+
+export function assertMaintenanceSpaceStatusScript(script) {
+  if (/taskSpace\s*\(|finish\s*\(|page\.goto|\.screenshot\s*\(/.test(script)) {
+    throw new Error("maintenance space status must not create, resume, navigate, or close");
+  }
+  if (!script.includes("VIDEO_PUBLISHER_MAINTENANCE_STATUS:")) {
+    throw new Error("maintenance space status must return its marker");
+  }
+}
+
+export function parseMaintenanceSpaceStatus(text) {
+  const source = String(text || "");
+  const marker = "VIDEO_PUBLISHER_MAINTENANCE_STATUS:";
+  const at = source.indexOf(marker);
+  if (at < 0) return { ok: false, error: "maintenance status marker missing" };
+  const parsed = parseJsonValue(source, at + marker.length);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  return { ok: true, payload: parsed.value };
 }
 
 export function sameAccountBinding(left, right) {

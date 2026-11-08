@@ -150,6 +150,23 @@ test("maintenance diagnose requires an explicit binding and a separate root", ()
   assert.throws(() => parse(["--package", "/tmp/pkg.json", "--operation", "create"], {
     loadConfig: () => maintenanceConfig,
   }), /productionReady is false/);
+  const status = parseMaintenance([
+    "--operation", "maintenance-space-status",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-account-check-585fe53-20261108-1201",
+  ]);
+  assert.equal(status.diagnosis, "maintenance-space-status");
+  assert.equal(status.maintenanceRoot, "");
+  assert.throws(() => parseMaintenance([
+    "--operation", "maintenance-space-status",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-account-check-585fe53-20261108-1201",
+    "--close-maintenance-space",
+  ]), /does not close a space/);
 });
 
 test("explicit operations guard cover replacement and repost", () => {

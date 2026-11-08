@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,12 +33,15 @@ import {
 } from "./lib/spaces.mjs";
 import {
   assertMaintenanceScript,
+  assertMaintenanceSpaceStatusScript,
   bindingDiagnosticScript,
   buildMaintenanceDiagnoseScript,
+  buildMaintenanceSpaceStatusScript,
   describeProfileInventory,
   describeSpaceInventory,
   explainDiscoveryConfig,
   parseMaintenanceOutput,
+  parseMaintenanceSpaceStatus,
   sameAccountBinding,
   sanitizeDiagnostic,
 } from "./lib/account-binding.mjs";
@@ -320,9 +324,74 @@ function maintenanceLibrarySource() {
   return source.slice(0, cut).replace(/^export /gm, "");
 }
 
+function reportedFlag(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  return "unknown";
+}
+
+function readMaintenanceCheckpoint(file, runId) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!parsed || typeof parsed !== "object" || parsed.runId !== runId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function mergeMaintenanceEvidence(parsed, checkpoint) {
+  const payload = { ...(parsed.payload || {}) };
+  if (payload.sideEffects !== "unknown") return { payload, evidenceSource: "ego-output", checkpointConflict: false };
+  if (!checkpoint) return { payload, evidenceSource: "none", checkpointConflict: false };
+  return {
+    payload: { ...checkpoint, sideEffects: "checkpoint" },
+    evidenceSource: "checkpoint",
+    checkpointConflict: false,
+  };
+}
+
+function maintenanceCloseFact(payload, closeAfter) {
+  const closeResult = payload.closeResult || {};
+  const reason = closeResult.reason || "";
+  if (closeResult.closed === true && reason === "finish-returned") {
+    return { closed: true, reason };
+  }
+  if (closeResult.closed === false && reason && reason !== "pending" && reason !== "unknown") {
+    return { closed: false, reason, error: closeResult.error || "" };
+  }
+  if (!closeAfter && payload.sideEffects !== "unknown" && payload.sideEffects !== "checkpoint") {
+    return { closed: false, reason: reason || "kept" };
+  }
+  if (!closeAfter && payload.sideEffects === "checkpoint" && reason === "kept") {
+    return { closed: false, reason: "kept" };
+  }
+  return { closed: "unknown", reason: reason || "close-result-not-returned" };
+}
+
+function writeEgoCapture(file, result) {
+  const body = [
+    `exitCode: ${result.code ?? ""}`,
+    "----- stdout -----",
+    result.stdout || "",
+    "----- stderr -----",
+    result.stderr || "",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, body, { mode: 0o600 });
+}
+
 async function runMaintenanceDiagnose(args) {
   fs.mkdirSync(args.maintenanceRoot, { recursive: true, mode: 0o700 });
+  const runId = crypto.randomBytes(8).toString("hex");
+  const checkpointPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.checkpoint.json`);
+  const egoLogPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.ego.log`);
+  const screenshotPaths = {
+    home: path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}-home.png`),
+    noteManager: path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}-notes.png`),
+  };
   const input = {
+    runId,
     binding: {
       profileId: args.accountBinding.profileId,
       displayName: args.accountBinding.displayName,
@@ -331,10 +400,8 @@ async function runMaintenanceDiagnose(args) {
     },
     spaceName: args.maintenanceSpaceName,
     closeAfter: args.closeMaintenanceSpace === true,
-    screenshots: {
-      home: path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}-home.png`),
-      noteManager: path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}-notes.png`),
-    },
+    checkpointPath,
+    screenshots: screenshotPaths,
   };
   const runner = buildMaintenanceDiagnoseScript(input);
   assertMaintenanceScript(runner);
@@ -344,38 +411,78 @@ async function runMaintenanceDiagnose(args) {
     packagePath: "",
     scope: "publisher",
   });
-  let parsed;
+  let result = { code: null, stdout: "", stderr: "" };
+  let parsed = { ok: false, error: "ego output was not captured", payload: { sideEffects: "unknown" } };
   try {
-    const result = await runEgoScript(script);
+    result = await runEgoScript(script);
+    writeEgoCapture(egoLogPath, result);
     parsed = parseMaintenanceOutput(`${result.stdout}\n${result.stderr}`);
-    if (!parsed.ok) parsed = { ok: false, error: parsed.error, exitCode: result.code, detail: `${result.stderr}\n${result.stdout}`.trim().slice(-800) };
+    if (!parsed.ok && parsed.payload?.sideEffects !== "unknown") {
+      parsed = { ...parsed, exitCode: result.code, detail: `${result.stderr}\n${result.stdout}`.trim().slice(-800) };
+    } else if (!parsed.ok) {
+      parsed = { ...parsed, exitCode: result.code, detail: `${result.stderr}\n${result.stdout}`.trim().slice(-800) };
+    }
+  } catch (error) {
+    writeEgoCapture(egoLogPath, { code: null, stdout: "", stderr: String(error?.stack || error) });
+    parsed = { ok: false, error: String(error?.message || error), payload: { sideEffects: "unknown" }, exitCode: null };
   } finally {
     release();
   }
-  const payload = parsed.payload || {};
+  const checkpoint = readMaintenanceCheckpoint(checkpointPath, runId);
+  const merged = mergeMaintenanceEvidence(parsed, checkpoint);
+  const payload = merged.payload;
+  if (parsed.payload?.sideEffects !== "unknown" && checkpoint) {
+    if (checkpoint.spaceId != null && payload.spaceId != null && String(checkpoint.spaceId) !== String(payload.spaceId)) {
+      merged.checkpointConflict = true;
+    }
+  }
+  const closeResult = maintenanceCloseFact(payload, args.closeMaintenanceSpace === true);
+  const screenshotFilesPresent = {
+    home: fs.existsSync(screenshotPaths.home),
+    notes: fs.existsSync(screenshotPaths.noteManager),
+  };
   const record = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: "maintenance-diagnose",
+    runId,
     pureReadOnly: false,
-    createsOwnSpace: payload.created === true,
-    navigatesAllowlistedAccountPages: payload.homeOpened === true,
+    publisherRetried: false,
+    evidenceSource: merged.evidenceSource,
+    checkpointConflict: merged.checkpointConflict === true,
+    sideEffects: payload.sideEffects || "unknown",
+    createsOwnSpace: reportedFlag(payload.created),
+    navigatesAllowlistedAccountPages: reportedFlag(payload.homeOpened),
     ready: false,
     accepted: false,
     accountVerified: false,
     publishable: false,
-    homeIdentityMatched: payload.homeIdentityMatched === true,
-    noteManagerOpened: payload.noteManagerOpened === true,
-    publishUrlOpened: payload.publishUrlOpened === true,
+    homeIdentityMatched: reportedFlag(payload.homeIdentityMatched),
+    noteManagerOpened: reportedFlag(payload.noteManagerOpened),
+    publishUrlOpened: reportedFlag(payload.publishUrlOpened),
     mediaRead: false,
-    finalGuardReleaseCalled: payload.finalGuardReleaseCalled === true,
+    finalGuardReleaseCalled: reportedFlag(payload.finalGuardReleaseCalled),
+    spaceId: payload.spaceId == null || merged.checkpointConflict ? null : payload.spaceId,
+    spaceIdState: payload.spaceId == null || merged.checkpointConflict ? "unknown" : "returned",
+    closeResult,
     controls: payload.controls || null,
+    screenshotFilesPresent,
+    screenshotFilesDoNotVerifyIdentity: true,
     productionStateWritten: false,
+    egoOutput: {
+      path: egoLogPath,
+      exitCode: result.code,
+      stdoutBytes: Buffer.byteLength(result.stdout || ""),
+      stderrBytes: Buffer.byteLength(result.stderr || ""),
+    },
+    checkpointPath: fs.existsSync(checkpointPath) ? checkpointPath : "",
     helpPrerequisites: [
       "Saved guide v2.2.0 documents taskSpace as reuse-or-create. This command creates one new named space; it does not read an existing space id.",
       "Home and note-manager URLs come from one historical 0.6.2.7 run, not from a guarantee that navigation has zero server-side writes.",
       "ownership values are not enumerated in that guide.",
       "Public lite.ego.app pages use useOrCreateTaskSpace and are not this command's contract.",
       "Controls not visible as text stay not-observed. That is not production acceptance.",
+      "A missing marker leaves side effects unknown. Screenshot files do not set homeIdentityMatched.",
+      "closeResult.closed is true only after finish returns. pending or a lost return stays unknown.",
     ],
     observed: payload,
     error: parsed.ok ? "" : parsed.error,
@@ -385,16 +492,75 @@ async function runMaintenanceDiagnose(args) {
   console.log(JSON.stringify({ ...record, maintenanceRecord: recordPath }, null, 2));
   const safeStop = payload.created === true
     && payload.homeIdentityMatched === true
-    && payload.publishUrlOpened !== true
-    && payload.finalGuardReleaseCalled !== true
-    && payload.retried !== true;
+    && payload.publishUrlOpened === false
+    && payload.finalGuardReleaseCalled === false
+    && payload.retried === false
+    && payload.sideEffects !== "unknown"
+    && (!args.closeMaintenanceSpace || closeResult.closed === true);
   if (!safeStop) process.exitCode = 10;
+}
+
+async function runMaintenanceSpaceStatus(args) {
+  const script = buildMaintenanceSpaceStatusScript({
+    spaceName: args.maintenanceSpaceName,
+    profileId: args.accountBinding.profileId,
+  });
+  assertMaintenanceSpaceStatusScript(script);
+  const release = acquireJobLock(resolvePublisherLockDirectory(), {
+    jobId: "maintenance-space-status",
+    packagePath: "",
+    scope: "publisher",
+  });
+  let result;
+  try {
+    result = await runEgoScript(script);
+  } finally {
+    release();
+  }
+  const parsed = parseMaintenanceSpaceStatus(`${result.stdout}\n${result.stderr}`);
+  const payload = parsed.payload || {};
+  const summary = {
+    schemaVersion: 1,
+    operation: "maintenance-space-status",
+    ready: false,
+    accepted: false,
+    accountVerified: false,
+    publishable: false,
+    publisherRetried: false,
+    taskSpaceCalled: false,
+    pageOpened: false,
+    finishCalled: false,
+    closeConfirmed: false,
+    spaceName: args.maintenanceSpaceName,
+    found: !parsed.ok ? "unknown" : payload.found === true ? true : payload.found === false ? false : "unknown",
+    ambiguous: parsed.ok ? payload.ambiguous === true : "unknown",
+    spaceId: parsed.ok && payload.found === true ? payload.spaceId : null,
+    spaceIdState: parsed.ok && payload.found === true && payload.spaceId != null ? "returned" : "unknown",
+    ownership: parsed.ok ? payload.ownership : null,
+    ownershipKnown: parsed.ok ? payload.ownershipKnown === true : false,
+    targetProfileListed: parsed.ok ? payload.targetProfileListed === true : "unknown",
+    profileIdMatches: parsed.ok ? payload.profileIdMatches : null,
+    inventoryAccessed: ["profiles", "listTaskSpaces"],
+    otherSpacesHidden: true,
+    otherProfilesHidden: true,
+    meaning: "Inventory match for one exact name. Absence does not prove finish succeeded. Presence does not claim, resume, or close the space. This command cannot close vp-maint-account-check-585fe53-20261108-1201 without taskSpace reuse-or-create.",
+    error: parsed.ok ? "" : parsed.error,
+    egoExitCode: result.code,
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  if (!parsed.ok || payload.taskSpaceCalled === true || payload.finishCalled === true || payload.closeConfirmed === true) {
+    process.exitCode = 10;
+  }
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.diagnosis === "maintenance-diagnose") {
     await runMaintenanceDiagnose(args);
+    return;
+  }
+  if (args.diagnosis === "maintenance-space-status") {
+    await runMaintenanceSpaceStatus(args);
     return;
   }
   if (args.diagnosis === "diagnose-binding") {
