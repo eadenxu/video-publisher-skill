@@ -7,8 +7,9 @@ if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <package.json> [task-suffix] [platform...]" >&2
   echo "   or: $0 --package <package.json> [--platform name]... [--task-suffix name] [--job-id id]" >&2
   echo "   or: $0 --operation diagnose-binding" >&2
+  echo "   or: $0 --operation maintenance-diagnose --profile-id ID --display-name NAME --account-id ID --maintenance-space-name vp-maint-NAME --maintenance-root DIR" >&2
   echo "   or: $0 --cleanup-only [--state-root DIR] [--package file] [--job-id id]" >&2
-  echo "Options: --operation auto|create|resume|inspect|replace-cover|repost|diagnose-binding|diagnose-dedup --replace-cover --confirm-new-copy" >&2
+  echo "Options: --operation auto|create|resume|inspect|replace-cover|repost|diagnose-binding|diagnose-dedup|maintenance-diagnose --replace-cover --confirm-new-copy" >&2
   echo "         --inspect-only --confirm-original-rights --fresh-space --reuse-space --force-fresh-space" >&2
   echo "         --keep-space --close-on-complete --cleanup-stale-spaces --no-cleanup-stale-spaces" >&2
   echo "         --space-prefix NAME --space-name NAME --space-suffix SUFFIX" >&2

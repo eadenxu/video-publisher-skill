@@ -409,6 +409,175 @@ export function explainDiscoveryConfig({ exists = false, onboardingRequired = fa
   };
 }
 
+const MAINTENANCE_SPACE_NAME = /^vp-maint-[A-Za-z0-9][A-Za-z0-9._-]{2,80}$/;
+
+export function planMaintenanceSpace({ binding, spaceName, profilesPayload, spacesPayload }) {
+  if (!binding?.profileId || !binding.displayName || !binding.accountId) {
+    return {
+      ok: false,
+      create: false,
+      code: "ACCOUNT_BINDING_INVALID",
+      message: "维护诊断需要明确的 profileId、显示名和账号 ID。未创建空间。",
+    };
+  }
+  if (!MAINTENANCE_SPACE_NAME.test(String(spaceName || ""))) {
+    return {
+      ok: false,
+      create: false,
+      code: "MAINTENANCE_SPACE_NAME_INVALID",
+      message: "维护空间名必须是 vp-maint- 开头的新名称。不会使用已有发布空间名。",
+    };
+  }
+  const profiles = extractProfileRecords(profilesPayload);
+  if (!profiles.records.length || profiles.shape === "unrecognized") {
+    return {
+      ok: false,
+      create: false,
+      code: "PROFILE_LIST_UNVERIFIED",
+      message: "profiles() 形状未知或为空。未创建空间，也未回退默认 Profile。",
+      evidence: { shape: profiles.shape, keys: profiles.keys },
+    };
+  }
+  if (!profiles.records.some(record => record.profileId === binding.profileId)) {
+    return {
+      ok: false,
+      create: false,
+      code: "PROFILE_NOT_LISTED",
+      message: "配置的 profileId 不在 profiles() 的 id 列表中。显示 name 不会代替 id。未创建空间。",
+      evidence: { configuredProfileId: binding.profileId, listedProfileIds: profiles.records.map(record => record.profileId) },
+    };
+  }
+  const spaces = extractSpaceRecords(spacesPayload);
+  if (spaces.shape === "unrecognized") {
+    return {
+      ok: false,
+      create: false,
+      code: "SPACE_LIST_UNVERIFIED",
+      message: "listTaskSpaces() 形状无法确认同名空间是否已存在。为避免接管已有空间，未调用 taskSpace。",
+      evidence: { shape: spaces.shape, keys: spaces.keys },
+    };
+  }
+  if (spaces.records.some(record => record.name === spaceName)) {
+    return {
+      ok: false,
+      create: false,
+      code: "MAINTENANCE_SPACE_NAME_CONFLICT",
+      message: "这个维护空间名已经在库存里。不 claim、不 adopt、不改 ownership，也不改用其他空间。",
+      evidence: { spaceName },
+    };
+  }
+  return {
+    ok: true,
+    create: true,
+    navigate: false,
+    profileId: binding.profileId,
+    spaceName,
+    profileProof: "create-option-only",
+  };
+}
+
+export function assertMaintenanceScript(script) {
+  const forbidden = [
+    /useOrCreateTaskSpace/,
+    /openOrReuseTab/,
+    /completeTaskSpace/,
+    /closeTaskSpace/,
+    /cliLog\s*\(/,
+    /releaseForConfirmedPublish/,
+    /uploadFile/,
+    /creator\.xiaohongshu\.com/,
+    /gotoAndWait/,
+    /newTab\s*\(/,
+    /switchTab\s*\(/,
+    /listTabs\s*\(/,
+    /newPage\s*\(/,
+    /userPage\s*\(/,
+    /\.tabs\s*\(/,
+    /\.pages\s*\(/,
+    /\bclick\s*\(/,
+  ];
+  const hit = forbidden.find(pattern => pattern.test(script));
+  if (hit) throw new Error(`maintenance script contains a forbidden call: ${hit}`);
+  const creates = script.match(/await taskSpace\(/g) || [];
+  if (creates.length !== 1) throw new Error("maintenance script must call taskSpace exactly once");
+  if (!script.includes("navigated: false")) throw new Error("maintenance script must record that it did not navigate");
+}
+
+export function buildMaintenanceDiagnoseScript(input) {
+  const runner = `
+const input = ${JSON.stringify(input)};
+const profilesPayload = await profiles();
+const spacesPayload = await listTaskSpaces();
+const plan = planMaintenanceSpace({
+  binding: input.binding,
+  spaceName: input.spaceName,
+  profilesPayload,
+  spacesPayload,
+});
+const base = {
+  plan,
+  navigated: false,
+  publishUrlOpened: false,
+  mediaRead: false,
+  retried: false,
+  finalGuardReleaseCalled: false,
+  controlsObserved: false,
+};
+if (!plan.create) {
+  console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ ...base, taskSpaceCalled: false, created: false }));
+} else {
+  let handle = null;
+  let callError = "";
+  try {
+    handle = await taskSpace(plan.spaceName, { profileId: plan.profileId });
+  } catch (error) {
+    callError = String(error && error.message || error);
+  }
+  if (!handle) {
+    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ ...base, taskSpaceCalled: true, created: false, callError }));
+  } else {
+    const spaceName = handle.name == null ? "" : String(handle.name);
+    const spaceId = handle.spaceId != null ? handle.spaceId : (handle.id != null ? handle.id : null);
+    const ownership = handle.ownership == null ? null : String(handle.ownership);
+    const nameMatches = spaceName === plan.spaceName;
+    let closeResult = { closed: false, reason: input.closeAfter ? "not-closed" : "kept" };
+    if (!nameMatches || ownership === "user" || spaceId == null) {
+      closeResult = { closed: false, reason: "refusing to finish a handle that is not the new maintenance space" };
+    } else if (input.closeAfter === true) {
+      if (typeof handle.finish !== "function") closeResult = { closed: false, reason: "finish-not-on-handle" };
+      else {
+        await handle.finish({ keep: false });
+        closeResult = { closed: true, keep: false };
+      }
+    }
+    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({
+      ...base,
+      taskSpaceCalled: true,
+      created: nameMatches && ownership !== "user" && spaceId != null,
+      spaceName,
+      spaceId,
+      ownership,
+      closeResult,
+      callError,
+    }));
+  }
+}
+`;
+  const script = `${runner}`;
+  return script;
+}
+
+export function parseMaintenanceOutput(text) {
+  const line = String(text || "").split(/\r?\n/).find(item => item.includes("VIDEO_PUBLISHER_MAINTENANCE:"));
+  if (!line) return { ok: false, error: "maintenance marker missing" };
+  const raw = line.slice(line.indexOf("VIDEO_PUBLISHER_MAINTENANCE:") + "VIDEO_PUBLISHER_MAINTENANCE:".length);
+  try {
+    return { ok: true, payload: JSON.parse(raw) };
+  } catch (error) {
+    return { ok: false, error: `maintenance payload was not JSON: ${String(error?.message || error)}` };
+  }
+}
+
 export function sameAccountBinding(left, right) {
   if (!left || !right) return false;
   return left.profileId === right.profileId

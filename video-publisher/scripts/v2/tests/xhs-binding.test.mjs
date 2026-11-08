@@ -13,9 +13,12 @@ import {
   describeProfileInventory,
   describeSpaceInventory,
   explainDiscoveryConfig,
+  assertMaintenanceScript,
+  buildMaintenanceDiagnoseScript,
   extractProfileRecords,
   extractSpaceRecords,
   normalizeAccountBinding,
+  planMaintenanceSpace,
   planTaskSpace,
 } from "../lib/account-binding.mjs";
 import { BLOCKER, classifyVerdict, evaluateObservation, requiredGates } from "../lib/model.mjs";
@@ -664,5 +667,175 @@ test("resume refuses to retarget a job onto another account", async () => {
   ], { env });
   assert.notEqual(resumed.code, 0);
   assert.match(`${resumed.stderr}\n${resumed.stdout}`, /Refusing to retarget this job/);
+  await fs.promises.rm(root, { recursive: true, force: true });
+});
+
+test("maintenance planning never creates when the name exists or the profile list is unknown", () => {
+  const binding = { profileId: "Profile 2", displayName: "Example Creator", accountId: "1000000001" };
+  const profiles = [{ id: "Profile 2", isDefault: false, name: "AI" }];
+  const created = planMaintenanceSpace({
+    binding,
+    spaceName: "vp-maint-example",
+    profilesPayload: profiles,
+    spacesPayload: [],
+  });
+  assert.equal(created.create, true);
+  assert.equal(created.navigate, false);
+  assert.equal(created.profileId, "Profile 2");
+  const conflict = planMaintenanceSpace({
+    binding,
+    spaceName: "vp-maint-example",
+    profilesPayload: profiles,
+    spacesPayload: [{ id: 4, name: "vp-maint-example", ownership: "agent" }],
+  });
+  assert.equal(conflict.create, false);
+  assert.equal(conflict.code, "MAINTENANCE_SPACE_NAME_CONFLICT");
+  const unknown = planMaintenanceSpace({
+    binding,
+    spaceName: "vp-maint-example",
+    profilesPayload: { browsers: [{ directory: "Profile 2" }] },
+    spacesPayload: [],
+  });
+  assert.equal(unknown.create, false);
+  assert.equal(unknown.code, "PROFILE_LIST_UNVERIFIED");
+  const label = planMaintenanceSpace({
+    binding: { ...binding, profileId: "AI" },
+    spaceName: "vp-maint-example",
+    profilesPayload: profiles,
+    spacesPayload: [],
+  });
+  assert.equal(label.code, "PROFILE_NOT_LISTED");
+  const script = buildMaintenanceDiagnoseScript({
+    binding,
+    spaceName: "vp-maint-example",
+    closeAfter: false,
+  });
+  assertMaintenanceScript(script);
+  assert.equal((script.match(/await taskSpace\(/g) || []).length, 1);
+  assert.doesNotMatch(script, /useOrCreateTaskSpace|openOrReuseTab|creator\.xiaohongshu\.com|releaseForConfirmedPublish|uploadFile|cliLog\s*\(/);
+});
+
+test("maintenance diagnose writes only its own root and does not navigate or upload", async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "video-publisher-maintenance-"));
+  const maintenanceRoot = path.join(root, "maintenance");
+  const stateRoot = path.join(root, "jobs");
+  const configPath = path.join(root, "config.json");
+  const scriptPath = path.join(root, "script.mjs");
+  const fakeEgoPath = path.join(root, "fake-ego.mjs");
+  const marker = path.join(root, "upload-marker");
+  writeConfig(createOnboardedConfig({
+    sourceDirectory: root,
+    availablePlatforms: ["xiaohongshu"],
+    defaultPlatforms: ["xiaohongshu"],
+    accounts: { xiaohongshu: { profileId: "Profile 2", profileLabel: "AI", displayName: "Example Creator", accountId: "1000000001" } },
+  }), configPath);
+  await fs.promises.writeFile(fakeEgoPath, `
+    import fs from "node:fs";
+    let script = "";
+    for await (const chunk of process.stdin) script += chunk;
+    fs.writeFileSync(process.env.VIDEO_PUBLISHER_TEST_SCRIPT, script);
+    if (/uploadFile|openOrReuseTab|releaseForConfirmedPublish|creator\\.xiaohongshu\\.com/.test(script)) {
+      fs.writeFileSync(process.env.VIDEO_PUBLISHER_TEST_MARKER, "mutation");
+    }
+    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({
+      created: true,
+      navigated: false,
+      publishUrlOpened: false,
+      mediaRead: false,
+      finalGuardReleaseCalled: false,
+      controlsObserved: false,
+      taskSpaceCalled: true,
+      retried: false,
+      spaceName: "vp-maint-example",
+      spaceId: "synthetic-maint-1",
+      closeResult: { closed: false, reason: "kept" }
+    }));
+  `);
+  const result = await run(process.execPath, [
+    path.join(V2_DIR, "publisher.mjs"),
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-example",
+    "--maintenance-root", maintenanceRoot,
+    "--state-root", stateRoot,
+  ], {
+    env: {
+      ...process.env,
+      VIDEO_PUBLISHER_CONFIG: configPath,
+      VIDEO_PUBLISHER_V2_EGO_COMMAND: fakeEgoPath,
+      VIDEO_PUBLISHER_TEST_SCRIPT: scriptPath,
+      VIDEO_PUBLISHER_TEST_MARKER: marker,
+      VIDEO_PUBLISHER_V2_LOCK_ROOT: path.join(root, "locks"),
+    },
+  });
+  assert.equal(result.code, 0, `${result.stderr}\n${result.stdout}`);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.existsSync(stateRoot), false);
+  const summary = JSON.parse(result.stdout);
+  assert.equal(summary.pureReadOnly, false);
+  assert.equal(summary.ready, false);
+  assert.equal(summary.accepted, false);
+  assert.equal(summary.accountVerified, false);
+  assert.equal(summary.publishable, false);
+  assert.equal(summary.navigated, false);
+  assert.equal(summary.publishUrlOpened, false);
+  assert.equal(summary.mediaRead, false);
+  assert.equal(summary.finalGuardReleaseCalled, false);
+  assert.equal(summary.productionStateWritten, false);
+  const script = await fs.promises.readFile(scriptPath, "utf8");
+  assert.equal((script.match(/await taskSpace\(/g) || []).length, 1);
+  assert.doesNotMatch(script, /useOrCreateTaskSpace|openOrReuseTab|releaseForConfirmedPublish|uploadFile/);
+  const record = JSON.parse(await fs.promises.readFile(path.join(maintenanceRoot, "vp-maint-example.json"), "utf8"));
+  assert.equal(record.publishable, false);
+  assert.equal(record.navigated, false);
+  await fs.promises.rm(root, { recursive: true, force: true });
+});
+
+test("maintenance diagnose uses the account lock across separate maintenance roots", async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "video-publisher-maintenance-lock-"));
+  const configPath = path.join(root, "config.json");
+  const fakeEgoPath = path.join(root, "fake-ego.mjs");
+  const lockRoot = path.join(root, "locks");
+  writeConfig(createOnboardedConfig({
+    sourceDirectory: root,
+    availablePlatforms: ["xiaohongshu"],
+    defaultPlatforms: ["xiaohongshu"],
+  }), configPath);
+  await fs.promises.writeFile(fakeEgoPath, `
+    import fs from "node:fs";
+    for await (const chunk of process.stdin) {}
+    fs.writeFileSync(process.env.VIDEO_PUBLISHER_TEST_READY, "ready");
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ created: true, navigated: false, publishUrlOpened: false, mediaRead: false, finalGuardReleaseCalled: false, spaceId: "synthetic", spaceName: process.env.SPACE_NAME }));
+  `);
+  const env = {
+    ...process.env,
+    VIDEO_PUBLISHER_CONFIG: configPath,
+    VIDEO_PUBLISHER_V2_EGO_COMMAND: fakeEgoPath,
+    VIDEO_PUBLISHER_V2_LOCK_ROOT: lockRoot,
+    VIDEO_PUBLISHER_TEST_READY: path.join(root, "ready"),
+  };
+  const argsFor = (name) => [
+    path.join(V2_DIR, "publisher.mjs"),
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", name,
+    "--maintenance-root", path.join(root, name),
+  ];
+  const first = run(process.execPath, argsFor("vp-maint-one"), { env: { ...env, SPACE_NAME: "vp-maint-one" } });
+  const started = Date.now();
+  while (!fs.existsSync(path.join(root, "ready")) && Date.now() - started < 3000) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  const second = await run(process.execPath, argsFor("vp-maint-two"), { env: { ...env, SPACE_NAME: "vp-maint-two" } });
+  const winner = await first;
+  assert.equal(winner.code, 0, `${winner.stderr}\n${winner.stdout}`);
+  assert.notEqual(second.code, 0);
+  assert.match(`${second.stderr}\n${second.stdout}`, /already running/);
+  assert.equal(fs.existsSync(path.join(lockRoot, "publisher", "orchestrator.lock")), false);
   await fs.promises.rm(root, { recursive: true, force: true });
 });

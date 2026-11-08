@@ -1,5 +1,11 @@
 import path from "node:path";
 
+function sameFields(left, right) {
+  return left.profileId === right.profileId
+    && left.displayName === right.displayName
+    && left.accountId === right.accountId;
+}
+
 export function uniqueSpaceSuffix() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
@@ -19,16 +25,23 @@ const VALUE_FLAGS = new Set([
   "--cleanup-name",
   "--cleanup-prefix",
   "--operation",
+  "--profile-id",
+  "--profile-label",
+  "--display-name",
+  "--account-id",
+  "--maintenance-space-name",
+  "--maintenance-root",
 ]);
 
-const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost", "diagnose-binding", "diagnose-dedup"]);
+const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost", "diagnose-binding", "diagnose-dedup", "maintenance-diagnose"]);
 
 export function parsePublisherArgs(argv, context) {
   const { loadConfig, PLATFORMS, UsageError, positive, defaultStateRoot } = context;
   const cleanupOnly = argv.includes("--cleanup-only");
   const operationIndex = argv.indexOf("--operation");
-  const metadataDiagnosis = operationIndex >= 0 && argv[operationIndex + 1] === "diagnose-binding";
-  const config = loadConfig({ requireOnboarded: !cleanupOnly && !metadataDiagnosis });
+  const requestedOperation = operationIndex >= 0 ? argv[operationIndex + 1] : "";
+  const skipsOnboarding = requestedOperation === "diagnose-binding" || requestedOperation === "maintenance-diagnose";
+  const config = loadConfig({ requireOnboarded: !cleanupOnly && !skipsOnboarding });
   const options = {
     inspectOnly: false,
     operation: "auto",
@@ -49,6 +62,13 @@ export function parsePublisherArgs(argv, context) {
     spaceSuffix: "",
     diagnosis: "",
     accountBinding: null,
+    maintenanceProfileId: "",
+    maintenanceProfileLabel: "",
+    maintenanceDisplayName: "",
+    maintenanceAccountId: "",
+    maintenanceSpaceName: "",
+    maintenanceRoot: "",
+    closeMaintenanceSpace: false,
     cleanupNames: ["oil-collect-publish"],
     cleanupPrefixes: [],
     packagePath: "",
@@ -68,6 +88,7 @@ export function parsePublisherArgs(argv, context) {
     if (arg === "--keep-space" || arg === "--no-close-on-complete") { options.keepSpace = true; continue; }
     if (arg === "--close-on-complete" || arg === "--close-space" || arg === "--no-keep-space") { options.keepSpace = false; continue; }
     if (arg === "--cleanup-only") { options.cleanupOnly = true; continue; }
+    if (arg === "--close-maintenance-space") { options.closeMaintenanceSpace = true; continue; }
     if (arg === "--cleanup-stale-spaces") { options.cleanupStaleSpaces = true; continue; }
     if (arg === "--no-cleanup-stale-spaces") { options.cleanupStaleSpaces = false; continue; }
     if (VALUE_FLAGS.has(arg)) {
@@ -84,6 +105,12 @@ export function parsePublisherArgs(argv, context) {
       else if (arg === "--check-concurrency") options.checkConcurrency = positive(value, arg);
       else if (arg === "--upload-concurrency") options.uploadConcurrency = positive(value, arg);
       else if (arg === "--operation") options.operation = value.trim();
+      else if (arg === "--profile-id") options.maintenanceProfileId = value.trim();
+      else if (arg === "--profile-label") options.maintenanceProfileLabel = value.trim();
+      else if (arg === "--display-name") options.maintenanceDisplayName = value.trim();
+      else if (arg === "--account-id") options.maintenanceAccountId = value.trim();
+      else if (arg === "--maintenance-space-name") options.maintenanceSpaceName = value.trim();
+      else if (arg === "--maintenance-root") options.maintenanceRoot = path.resolve(value);
       else if (arg === "--platform" || arg === "--platforms") {
         platforms.push(...value.split(",").map(item => item.trim()).filter(Boolean));
       } else if (arg === "--cleanup-name") {
@@ -102,16 +129,19 @@ export function parsePublisherArgs(argv, context) {
   if (!options.packagePath && positional.length && cleanupOnly && positional[0].endsWith(".json")) {
     options.packagePath = path.resolve(positional.shift());
   }
-  if (!options.packagePath && !cleanupOnly && options.operation !== "diagnose-binding") {
+  const maintenance = options.operation === "maintenance-diagnose";
+  if (!options.packagePath && !cleanupOnly && options.operation !== "diagnose-binding" && !maintenance) {
     throw new UsageError("Usage: run-safe-platforms.sh <package.json> [task-suffix] [platform...] [--package|--platform|--task-suffix|--job-id|--fresh-space|--reuse-space|--close-on-complete|--cleanup-only]");
   }
   if (!options.taskSuffix && positional.length && !PLATFORMS.includes(positional[0])) {
     options.taskSuffix = positional.shift();
   }
   if (!options.taskSuffix) options.taskSuffix = "manual";
-  const selected = [...new Set(platforms.length ? platforms : positional.length ? positional : (cleanupOnly ? [] : config.defaultPlatforms))];
+  const selected = maintenance
+    ? []
+    : [...new Set(platforms.length ? platforms : positional.length ? positional : (cleanupOnly ? [] : config.defaultPlatforms))];
   if (selected.some(platform => !PLATFORMS.includes(platform))) throw new UsageError("Unsupported platform argument");
-  if (!cleanupOnly && options.operation !== "diagnose-binding") {
+  if (!cleanupOnly && options.operation !== "diagnose-binding" && !maintenance) {
     const unavailablePlatforms = selected.filter(platform => !(config.availablePlatforms || []).includes(platform));
     if (unavailablePlatforms.length) {
       throw new UsageError(`Platform is not configured as available: ${unavailablePlatforms.join(", ")}. Update Video Publisher onboarding before browser work.`);
@@ -134,6 +164,32 @@ export function parsePublisherArgs(argv, context) {
   }
   const normalizedBinding = config.accounts?.xiaohongshu || null;
   if (normalizedBinding) options.accountBinding = normalizedBinding;
+  if (maintenance) {
+    options.diagnosis = "maintenance-diagnose";
+    options.inspectOnly = true;
+    options.freshSpace = false;
+    options.cleanupStaleSpaces = false;
+    const missing = [];
+    if (!options.maintenanceProfileId) missing.push("--profile-id");
+    if (!options.maintenanceDisplayName) missing.push("--display-name");
+    if (!options.maintenanceAccountId) missing.push("--account-id");
+    if (!options.maintenanceSpaceName) missing.push("--maintenance-space-name");
+    if (!options.maintenanceRoot) missing.push("--maintenance-root");
+    if (missing.length) throw new UsageError(`maintenance-diagnose requires ${missing.join(", ")}`);
+    if (options.maintenanceRoot === defaultStateRoot || (options.stateRoot && options.maintenanceRoot === options.stateRoot)) {
+      throw new UsageError("--maintenance-root must be separate from production job state");
+    }
+    const requested = {
+      profileId: options.maintenanceProfileId,
+      displayName: options.maintenanceDisplayName,
+      accountId: options.maintenanceAccountId,
+      profileLabel: options.maintenanceProfileLabel,
+    };
+    if (options.accountBinding && !sameFields(options.accountBinding, requested)) {
+      throw new UsageError("CLI account binding does not match accounts.xiaohongshu. Refusing to retarget.");
+    }
+    options.accountBinding = { ...(options.accountBinding || {}), ...requested };
+  }
   if (options.operation === "replace-cover" && !options.jobId) {
     throw new UsageError("--operation replace-cover requires --job-id for the existing READY draft");
   }

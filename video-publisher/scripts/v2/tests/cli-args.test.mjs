@@ -93,6 +93,30 @@ test("profile discovery does not require a package", () => {
   assert.equal(args.inspectOnly, true);
 });
 
+test("maintenance diagnose requires an explicit binding and a separate root", () => {
+  assert.throws(() => parse(["--operation", "maintenance-diagnose"]), /maintenance-diagnose requires/);
+  const args = parse([
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-example",
+    "--maintenance-root", "/tmp/vp-maint-root",
+  ]);
+  assert.equal(args.diagnosis, "maintenance-diagnose");
+  assert.equal(args.packagePath, "");
+  assert.deepEqual(args.platforms, []);
+  assert.equal(args.cleanupStaleSpaces, false);
+  assert.throws(() => parse([
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-example",
+    "--maintenance-root", "/tmp/v2-jobs",
+  ]), /separate from production job state/);
+});
+
 test("explicit operations guard cover replacement and repost", () => {
   const replace = parse(["--package", "/tmp/pkg.json", "--job-id", "ready-job", "--replace-cover"]);
   assert.equal(replace.operation, "replace-cover");

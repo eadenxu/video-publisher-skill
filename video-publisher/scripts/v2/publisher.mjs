@@ -31,10 +31,13 @@ import {
   shouldRotateSpaces,
 } from "./lib/spaces.mjs";
 import {
+  assertMaintenanceScript,
   bindingDiagnosticScript,
+  buildMaintenanceDiagnoseScript,
   describeProfileInventory,
   describeSpaceInventory,
   explainDiscoveryConfig,
+  parseMaintenanceOutput,
   sameAccountBinding,
   sanitizeDiagnostic,
 } from "./lib/account-binding.mjs";
@@ -310,8 +313,80 @@ async function runMetadataOnlyBindingDiagnosis(args) {
   if (diagnostic.captured !== true) process.exitCode = 10;
 }
 
+function maintenanceLibrarySource() {
+  const source = fs.readFileSync(path.join(DIR, "lib", "account-binding.mjs"), "utf8");
+  const cut = source.indexOf("export function assertMaintenanceScript");
+  if (cut < 0) throw new Error("maintenance planner is missing from account-binding.mjs");
+  return source.slice(0, cut).replace(/^export /gm, "");
+}
+
+async function runMaintenanceDiagnose(args) {
+  const input = {
+    binding: {
+      profileId: args.accountBinding.profileId,
+      displayName: args.accountBinding.displayName,
+      accountId: args.accountBinding.accountId,
+      profileLabel: args.accountBinding.profileLabel || "",
+    },
+    spaceName: args.maintenanceSpaceName,
+    closeAfter: args.closeMaintenanceSpace === true,
+  };
+  const runner = buildMaintenanceDiagnoseScript(input);
+  assertMaintenanceScript(runner);
+  const script = `${maintenanceLibrarySource()}\n${runner}`;
+  const release = acquireJobLock(resolvePublisherLockDirectory(), {
+    jobId: "maintenance-diagnose",
+    packagePath: "",
+    scope: "publisher",
+  });
+  let parsed;
+  try {
+    const result = await runEgoScript(script);
+    parsed = parseMaintenanceOutput(`${result.stdout}\n${result.stderr}`);
+    if (!parsed.ok) parsed = { ok: false, error: parsed.error, exitCode: result.code, detail: `${result.stderr}\n${result.stdout}`.trim().slice(-800) };
+  } finally {
+    release();
+  }
+  const payload = parsed.payload || {};
+  const record = {
+    schemaVersion: 1,
+    kind: "maintenance-diagnose",
+    pureReadOnly: false,
+    createsOwnSpace: payload.created === true,
+    ready: false,
+    accepted: false,
+    accountVerified: false,
+    publishable: false,
+    navigated: false,
+    publishUrlOpened: false,
+    mediaRead: false,
+    finalGuardReleaseCalled: false,
+    controlsObserved: false,
+    productionStateWritten: false,
+    helpPrerequisites: [
+      "Saved Ego guide v2.2.0 documents taskSpace as reuse-or-create, not as a side-effect-free read of an existing space.",
+      "That guide does not document a non-draft Xiaohongshu account URL, nor the allowed ownership values.",
+      "Public lite.ego.app pages use useOrCreateTaskSpace and were not used as this operation's contract.",
+      "Account and control readback stays unverified until a version-matched help shows a page read that does not create a platform draft.",
+    ],
+    observed: payload,
+    error: parsed.ok ? "" : parsed.error,
+  };
+  fs.mkdirSync(args.maintenanceRoot, { recursive: true, mode: 0o700 });
+  const recordPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.json`);
+  fs.writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify({ ...record, maintenanceRecord: recordPath }, null, 2));
+  if (payload.created !== true || payload.navigated === true || payload.publishUrlOpened === true || payload.finalGuardReleaseCalled === true) {
+    process.exitCode = 10;
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.diagnosis === "maintenance-diagnose") {
+    await runMaintenanceDiagnose(args);
+    return;
+  }
   if (args.diagnosis === "diagnose-binding") {
     await runMetadataOnlyBindingDiagnosis(args);
     return;
