@@ -88,7 +88,7 @@ B站关闭双比例同步，分别上传 4:3 与 16:9 文件，完成两槽后�
 以下项目没有现场证据，不能写成已验收，也不能写成平台不支持：
 
 - 2026-11-07 mini 只读诊断带回一条 profile：`id` 为字面值 `Profile 2`，`name` 为 `AI`，`isDefault` 为 false。解析器按这个形状读取；空的 `listTaskSpaces()` 只说明该次库存，不能当作恢复已验证。页面身份、声明、合集、去重、封面和定时仍未实页验收。
-- `maintenance-diagnose` 的模拟证明：同名空间、未知列表或 id 不在 `profiles()` 中时不调用 `taskSpace`；脚本只允许历史非发布页 `/new/home` 与 `/new/note-manager`，首页身份不匹配就不进入管理页，不打开 `/publish/publish`，不点击控件，不调用 `releaseForConfirmedPublish`。首页文本匹配也不等于生产 READY。它只接受 `purpose` 为 `maintenance-account-observation` 的外置配置；`validate-maintenance` 在模拟里成功且 `productionReady` 为 false，生产 `validate` 和 create/resume/inspect 拒绝该文件。事实标记写在 `finish` 之前；缺少标记时结果是 `unknown` 而不是 false，截图文件不改写身份。`finish` 未返回时关闭结果保持 `unknown`。公开 lite.ego.app 文档属于另一代接口，没有当作当前契约。585fe53 那一次实页的原始 Ego stdout/stderr 没有落盘。b118 的库存查询在模拟之外返回过该维护空间仍在；`maintenance-close-space` 只在模拟里证明按 id 收拢的失败关闭，没有在本轮对实页调用 `taskSpace`。
+- `maintenance-diagnose` 的模拟证明：同名空间、未知列表或 id 不在 `profiles()` 中时不调用 `taskSpace`；脚本只允许历史非发布页 `/new/home` 与 `/new/note-manager`，首页身份不匹配就不进入管理页，不打开 `/publish/publish`，不点击控件，不调用 `releaseForConfirmedPublish`。首页文本匹配也不等于生产 READY。它只接受 `purpose` 为 `maintenance-account-observation` 的外置配置；`validate-maintenance` 在模拟里成功且 `productionReady` 为 false，生产 `validate` 和 create/resume/inspect 拒绝该文件。事实标记写在 `finish` 之前；缺少标记时结果是 `unknown` 而不是 false，截图文件不改写身份。`finish` 未返回时关闭结果保持 `unknown`。公开 lite.ego.app 文档属于另一代接口，没有当作当前契约。585fe53 那一次实页的原始 Ego stdout/stderr 没有落盘。b118 的库存查询返回该维护空间仍在。99ddff1 对 107 的一次 `taskSpace(id)` 句柄匹配后，`finish({ keep: false })` 被已安装的 Ego 0.6.2.7 拒绝：`keep` 必须是 `"all"` 或由不重复、非空页面标签组成的数组。这次没有关闭回执，也没有库存消失。
 - 小红书页面上的账号名、账号 ID、`笔记含AI合成内容`、合集、正文和定时控件选择器。
 - 笔记管理里的已发/已定时去重。
 - 目标时刻的定时控件读回。现有 3:4 封面路径没有在本轮重新做实页验收。

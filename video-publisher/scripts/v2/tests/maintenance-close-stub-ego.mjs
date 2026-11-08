@@ -2,6 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const finishContract = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "ego-finish-contract.mjs"), "utf8").replace(/^export /gm, "");
 
 let script = "";
 for await (const chunk of process.stdin) script += chunk;
@@ -15,7 +18,8 @@ if ((script.match(/await taskSpace\s*\(/g) || []).length !== 1) {
 }
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vp-close-stub-"));
 const program = path.join(dir, "run.mjs");
-fs.writeFileSync(program, `
+fs.writeFileSync(program, `${finishContract}
+` + `
 globalThis.profiles = async () => JSON.parse(process.env.STUB_PROFILES);
 let listCount = 0;
 const calls = [];
@@ -33,6 +37,7 @@ globalThis.taskSpace = async (id, options) => {
     name: handle.name,
     ownership: handle.ownership,
     async finish(arg) {
+      assertSdkFinishKeep(arg && arg.keep);
       calls.push(["finish", JSON.stringify(arg)]);
       if (process.env.STUB_FINISH === "throw") throw new Error("finish failed");
       if (process.env.STUB_FINISH === "drop") process.exit(0);

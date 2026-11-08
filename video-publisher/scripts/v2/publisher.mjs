@@ -565,11 +565,13 @@ async function runMaintenanceClose(args) {
     pageOpened: reportedFlag(payload.pageOpened),
     spaceId: payload.handleMatched === true ? payload.spaceId : null,
     spaceIdState: payload.handleMatched === true && payload.spaceId != null ? "returned" : "unknown",
-    returnedHandle: payload.handleMatched === true ? null : {
-      spaceId: payload.spaceId ?? null,
-      spaceName: payload.spaceName ?? null,
-      ownership: payload.ownership ?? null,
-    },
+    returnedHandle: payload.taskSpaceCalled === true && (payload.handleMatched === true || payload.decisionCode === "HANDLE_MISMATCH")
+      ? {
+          spaceId: payload.spaceId ?? null,
+          spaceName: payload.spaceName ?? null,
+          ownership: payload.ownership ?? null,
+        }
+      : null,
     decisionCode: payload.decisionCode || "",
     closeResult,
     inventoryAfter,
@@ -589,6 +591,7 @@ async function runMaintenanceClose(args) {
       "This is not a pure read and does not guarantee that the call created nothing.",
       "closeResult is the finish receipt. inventoryCleared is a later listTaskSpaces snapshot. One does not prove the other.",
       "claimTaskSpace is not used. No page is opened.",
+      "Installed Ego 0.6.2.7 rejects finish keep:false. keep must be \"all\" or an array of unique non-empty page labels. This close passes keep:[] so no page label is retained.",
     ],
     error: parsed.ok ? "" : parsed.error,
   };

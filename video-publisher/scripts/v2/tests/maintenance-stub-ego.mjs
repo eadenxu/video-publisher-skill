@@ -2,6 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const finishContract = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "ego-finish-contract.mjs"), "utf8").replace(/^export /gm, "");
 
 let script = "";
 for await (const chunk of process.stdin) script += chunk;
@@ -48,7 +51,10 @@ globalThis.taskSpace = async (name, options) => {
     spaceId: 321,
     ownership: "agent",
     async newPage() { calls.push(["newPage"]); return page; },
-    async finish(arg) { calls.push(["finish", JSON.stringify(arg)]); },
+    async finish(arg) {
+      assertSdkFinishKeep(arg && arg.keep);
+      calls.push(["finish", JSON.stringify(arg)]);
+    },
   };
 };
 `;
@@ -56,7 +62,7 @@ const trailer = statusOnly ? "" : `
 const fsMod = await import("node:fs");
 fsMod.writeFileSync(process.env.STUB_CALLS, JSON.stringify(calls));
 `;
-fs.writeFileSync(program, `
+fs.writeFileSync(program, `${finishContract}
 globalThis.profiles = async () => JSON.parse(process.env.STUB_PROFILES);
 globalThis.listTaskSpaces = async () => JSON.parse(process.env.STUB_SPACES);
 ${prelude}

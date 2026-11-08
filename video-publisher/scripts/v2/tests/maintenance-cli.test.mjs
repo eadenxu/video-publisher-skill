@@ -143,7 +143,7 @@ test("public maintenance CLI accepts the maintenance config through status and d
     "https://creator.xiaohongshu.com/new/home",
     "https://creator.xiaohongshu.com/new/note-manager",
   ]);
-  assert.equal(calls.some(call => call[0] === "finish" && call[1].includes('"keep":false')), true);
+  assert.equal(calls.some(call => call[0] === "finish" && call[1] === '{"keep":[]}'), true);
   const checkpoint = JSON.parse(fs.readFileSync(path.join(diagnoseRoot, "vp-maint-cli-synthetic.checkpoint.json"), "utf8"));
   assert.equal(checkpoint.spaceId, 321);
   assert.equal(checkpoint.closeResult.closed, true);

@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { selectMaintenanceCloseTarget } from "../lib/account-binding.mjs";
+import { assertSdkFinishKeep } from "./ego-finish-contract.mjs";
 
 const TEST_DIR = path.dirname(fileURLToPath(import.meta.url));
 const V2_DIR = path.resolve(TEST_DIR, "..");
@@ -42,6 +43,15 @@ function matched(spaces) {
     spacesPayload: spaces,
   });
 }
+
+test("installed finish contract rejects boolean keep and accepts an empty label array", () => {
+  for (const value of [false, true, null, undefined, "", ["p1", "p1"], ["p1", ""], [1]]) {
+    assert.throws(() => assertSdkFinishKeep(value), /array of unique non-empty Page labels/);
+  }
+  assert.doesNotThrow(() => assertSdkFinishKeep([]));
+  assert.doesNotThrow(() => assertSdkFinishKeep("all"));
+  assert.doesNotThrow(() => assertSdkFinishKeep(["p1"]));
+});
 
 test("close target selection refuses every inventory mismatch before taskSpace", () => {
   assert.equal(matched([OTHER, OWN]).taskSpaceAllowed, true);
@@ -120,7 +130,8 @@ test("public close CLI finishes only the matched own handle and records inventor
   const calls = JSON.parse(fs.readFileSync(callsPath, "utf8"));
   assert.deepEqual(calls.filter(call => call[0] === "taskSpace"), [["taskSpace", 107, true]]);
   assert.equal(calls.filter(call => call[0] === "finish").length, 1);
-  assert.match(calls.find(call => call[0] === "finish")[1], /"keep":false/);
+  assert.equal(calls.find(call => call[0] === "finish")[1], '{"keep":[]}');
+  assert.deepEqual(closedBody.returnedHandle, { spaceId: 107, spaceName: SPACE_NAME, ownership: "agent" });
   const checkpoint = JSON.parse(fs.readFileSync(path.join(root, "closed", `${SPACE_NAME}.close.checkpoint.json`), "utf8"));
   assert.equal(checkpoint.closeResult.closed, true);
   assert.match(fs.readFileSync(closedBody.egoOutput.path, "utf8"), /VIDEO_PUBLISHER_MAINTENANCE:/);

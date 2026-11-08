@@ -581,6 +581,12 @@ export function assertMaintenanceScript(script) {
   if (!script.includes("\"pending\"")) {
     throw new Error("close must stay pending until finish returns");
   }
+  if (/keep:\s*(?:false|true)\b/.test(script)) {
+    throw new Error("task.finish keep must be \"all\" or an array of page labels");
+  }
+  if (script.includes("handle.finish") && !script.includes("keep: []")) {
+    throw new Error("maintenance finish must pass keep: []");
+  }
 }
 
 export function buildMaintenanceDiagnoseScript(input) {
@@ -681,8 +687,8 @@ if (!plan.create) {
       try {
         if (typeof handle.finish !== "function") snapshot.closeResult = { closed: false, reason: "finish-not-on-handle" };
         else {
-          await handle.finish({ keep: false });
-          snapshot.closeResult = { closed: true, keep: false, reason: "finish-returned" };
+          await handle.finish({ keep: [] });
+          snapshot.closeResult = { closed: true, keep: [], reason: "finish-returned" };
         }
       } catch (error) {
         snapshot.closeResult = { closed: false, reason: "finish-threw", error: String(error && error.message || error) };
@@ -995,8 +1001,8 @@ if (!decision.taskSpaceAllowed) {
       try {
         if (typeof handle.finish !== "function") closeResult = { closed: false, reason: "finish-not-on-handle" };
         else {
-          await handle.finish({ keep: false });
-          closeResult = { closed: true, keep: false, reason: "finish-returned" };
+          await handle.finish({ keep: [] });
+          closeResult = { closed: true, keep: [], reason: "finish-returned" };
         }
       } catch (error) {
         closeResult = { closed: false, reason: "finish-threw", error: String(error && error.message || error) };
@@ -1038,6 +1044,8 @@ export function assertMaintenanceCloseScript(script) {
   const finishAt = script.indexOf("await handle.finish");
   if (!(factAt >= 0 && finishAt > factAt)) throw new Error("close facts must be logged before finish");
   if (!script.includes("\"pending\"")) throw new Error("close must stay pending until finish returns");
+  if (!script.includes("keep: []")) throw new Error("maintenance close must finish with keep: []");
+  if (/keep:\s*(?:false|true)\b/.test(script)) throw new Error("task.finish keep must be \"all\" or an array of page labels");
 }
 
 export function sameAccountBinding(left, right) {
