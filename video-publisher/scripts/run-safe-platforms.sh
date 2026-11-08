@@ -12,7 +12,7 @@ if [[ $# -lt 1 ]]; then
   echo "   or: $0 --operation maintenance-space-status --profile-id ID --display-name NAME --account-id ID --maintenance-space-name EXACT" >&2
   echo "      maintenance-space-status only lists one exact name. It does not create, resume, or close." >&2
   echo "   or: $0 --cleanup-only [--state-root DIR] [--package file] [--job-id id]" >&2
-  echo "Options: --operation auto|create|resume|inspect|replace-cover|repost|diagnose-binding|diagnose-dedup|maintenance-diagnose --replace-cover --confirm-new-copy" >&2
+  echo "Options: --operation auto|create|resume|inspect|replace-cover|repost|diagnose-binding|diagnose-dedup|maintenance-diagnose|maintenance-space-status --replace-cover --confirm-new-copy" >&2
   echo "         --inspect-only --confirm-original-rights --fresh-space --reuse-space --force-fresh-space" >&2
   echo "         --keep-space --close-on-complete --cleanup-stale-spaces --no-cleanup-stale-spaces" >&2
   echo "         --space-prefix NAME --space-name NAME --space-suffix SUFFIX" >&2

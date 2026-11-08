@@ -35,13 +35,14 @@ const VALUE_FLAGS = new Set([
 ]);
 
 const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost", "diagnose-binding", "diagnose-dedup", "maintenance-diagnose", "maintenance-space-status"]);
+const MAINTENANCE_CLI_OPERATIONS = new Set(["maintenance-diagnose", "maintenance-space-status"]);
 
 export function parsePublisherArgs(argv, context) {
   const { loadConfig, PLATFORMS, UsageError, positive, defaultStateRoot } = context;
   const cleanupOnly = argv.includes("--cleanup-only");
   const operationIndex = argv.indexOf("--operation");
   const requestedOperation = operationIndex >= 0 ? argv[operationIndex + 1] : "";
-  const skipsOnboarding = requestedOperation === "diagnose-binding" || requestedOperation === "maintenance-diagnose";
+  const skipsOnboarding = requestedOperation === "diagnose-binding" || MAINTENANCE_CLI_OPERATIONS.has(requestedOperation);
   const config = loadConfig({ requireOnboarded: !cleanupOnly && !skipsOnboarding });
   const options = {
     inspectOnly: false,
@@ -131,7 +132,7 @@ export function parsePublisherArgs(argv, context) {
     options.packagePath = path.resolve(positional.shift());
   }
   const maintenanceStatus = options.operation === "maintenance-space-status";
-  const maintenance = options.operation === "maintenance-diagnose" || maintenanceStatus;
+  const maintenance = MAINTENANCE_CLI_OPERATIONS.has(options.operation);
   if (!options.packagePath && !cleanupOnly && options.operation !== "diagnose-binding" && !maintenance) {
     throw new UsageError("Usage: run-safe-platforms.sh <package.json> [task-suffix] [platform...] [--package|--platform|--task-suffix|--job-id|--fresh-space|--reuse-space|--close-on-complete|--cleanup-only]");
   }
