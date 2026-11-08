@@ -12,11 +12,35 @@ export const BLOCKER = Object.freeze({
   INPUT_CHANNEL_BROKEN: "INPUT_CHANNEL_BROKEN",
   PLATFORM_REJECTED_ASSET: "PLATFORM_REJECTED_ASSET",
   ACTION_FAILED: "ACTION_FAILED",
+  ACCOUNT_MISMATCH: "ACCOUNT_MISMATCH",
+  ACCOUNT_UNVERIFIED: "ACCOUNT_UNVERIFIED",
+  ACCOUNT_AMBIGUOUS: "ACCOUNT_AMBIGUOUS",
+  ACCOUNT_BINDING_INVALID: "ACCOUNT_BINDING_INVALID",
+  PROFILE_NOT_LISTED: "PROFILE_NOT_LISTED",
+  PROFILE_LIST_UNVERIFIED: "PROFILE_LIST_UNVERIFIED",
+  SPACE_PROFILE_UNVERIFIED: "SPACE_PROFILE_UNVERIFIED",
+  AI_DECLARATION_UNVERIFIED: "AI_DECLARATION_UNVERIFIED",
+  COLLECTION_UNVERIFIED: "COLLECTION_UNVERIFIED",
+  SCHEDULE_CONTROL_UNVERIFIED: "SCHEDULE_CONTROL_UNVERIFIED",
+  PLATFORM_HISTORY_UNVERIFIED: "PLATFORM_HISTORY_UNVERIFIED",
+  PLATFORM_DUPLICATE: "PLATFORM_DUPLICATE",
+  PROSE_NOT_RETAINED: "PROSE_NOT_RETAINED",
 });
+
+export const IDENTITY_STOP_CODES = Object.freeze([
+  BLOCKER.ACCOUNT_MISMATCH,
+  BLOCKER.ACCOUNT_UNVERIFIED,
+  BLOCKER.ACCOUNT_AMBIGUOUS,
+  BLOCKER.ACCOUNT_BINDING_INVALID,
+  BLOCKER.PROFILE_NOT_LISTED,
+  BLOCKER.PROFILE_LIST_UNVERIFIED,
+  BLOCKER.SPACE_PROFILE_UNVERIFIED,
+]);
 
 const REQUIRED_GATES = Object.freeze({
   xiaohongshu: [
-    "authenticated", "draftIdentity", "video", "title", "tags", "original",
+    "authenticated", "accountIdentity", "draftIdentity", "video", "title", "tags", "original",
+    "aiSynthesis", "collection", "prose", "schedule", "platformDedup",
     "cover", "noBlockingDialog", "finalButton", "safety",
   ],
   douyin: [
@@ -79,6 +103,16 @@ function normalizedBlocker(blocker) {
 
 function missingGateBlocker(observation, missing) {
   const gates = observation.gates || {};
+  if (gates.accountIdentity?.ok === false && gates.accountIdentity?.evidence?.required !== false) {
+    const code = gates.accountIdentity.evidence?.code || BLOCKER.ACCOUNT_UNVERIFIED;
+    return {
+      code,
+      message: gates.accountIdentity.evidence?.message || "账号绑定没有被页面证据确认",
+      retryable: false,
+      requiresUser: code === BLOCKER.ACCOUNT_MISMATCH || code === BLOCKER.ACCOUNT_AMBIGUOUS,
+      evidence: gates.accountIdentity.evidence || null,
+    };
+  }
   if (gates.authenticated?.ok === false) {
     return { code: BLOCKER.AUTH_REQUIRED, message: "平台登录态无效或遇到安全验证", retryable: false, requiresUser: true };
   }
@@ -87,6 +121,18 @@ function missingGateBlocker(observation, missing) {
   }
   if (gates.video?.evidence?.uploading === true) {
     return { code: BLOCKER.UPLOAD_STALLED, message: "视频仍在上传或处理中", retryable: true, requiresUser: false };
+  }
+  for (const name of ["aiSynthesis", "collection", "prose", "schedule", "platformDedup"]) {
+    const gate = gates[name];
+    if (gate?.ok === false && gate.evidence?.required !== false && gate.evidence?.code) {
+      return {
+        code: gate.evidence.code,
+        message: gate.evidence.message || `${name} 没有被新鲜读回`,
+        retryable: false,
+        requiresUser: false,
+        evidence: gate.evidence,
+      };
+    }
   }
   return {
     code: BLOCKER.STATE_AMBIGUOUS,
@@ -136,6 +182,8 @@ export function evaluateObservation(observation) {
 
 export function classifyVerdict(verdict) {
   if (verdict.ready) return "ready";
+  if (IDENTITY_STOP_CODES.includes(verdict.blocker?.code)) return "blocked";
+  if (verdict.blocker?.code === BLOCKER.PLATFORM_HISTORY_UNVERIFIED || verdict.blocker?.code === BLOCKER.PLATFORM_DUPLICATE) return "blocked";
   if (verdict.blocker?.code === BLOCKER.AUTH_REQUIRED || verdict.blocker?.code === BLOCKER.USER_CONTROL) return "blocked_user";
   if (verdict.blocker?.code === BLOCKER.INPUT_CHANNEL_BROKEN) return "blocked";
   if (verdict.blocker?.code === BLOCKER.FOREIGN_DRAFT) {

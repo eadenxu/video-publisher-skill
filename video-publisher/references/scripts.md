@@ -76,7 +76,7 @@ Options:
 --platform <name>          (repeatable)
 --platforms a,b,c
 --task-suffix <name>
---operation <auto|create|resume|inspect|replace-cover|repost>
+--operation <auto|create|resume|inspect|replace-cover|repost|diagnose-binding|diagnose-dedup>
 --inspect-only
 --replace-cover            replace covers on an existing READY draft; requires --job-id
 --confirm-new-copy         required with --operation repost
@@ -103,6 +103,97 @@ Options:
 Space policy: a new job gets a unique space. `running`, `inspecting`, `paused_user`, and `blocked` jobs reuse the recorded space so drafts and receipts stay attached. An implicit rerun of a `READY` job exits with usage error and performs no browser work. After READY, this job's draft pages stay open so the user can click publish. That keep-flag is written to `state.json`. Stale cleanup only closes retired spaces, leftover `oil-collect-publish`, and other `ready`/`inspected` jobs that were explicitly closed with `--close-on-complete`. `--inspect-only` does not close an in-progress or kept job. `--cleanup-only --package` takes the job lock and can close a finished job's current spaces; it never closes an in-progress job. It does not prefix-sweep `video publisher v2 *`. `USER_CONTROL` never closes spaces.
 
 To resume an interrupted generation, repeat the same command with the same `--job-id`, or add `--operation resume`. To inspect a READY draft use `--operation inspect`. To create an intentional second copy use `--operation repost --confirm-new-copy`; omit `--job-id` for a generated new identity, or provide a new unused id. To close leftover spaces without generating: `scripts/run-safe-platforms.sh --cleanup-only`.
+
+## Xiaohongshu account binding, schedule readback, and history dedup
+
+These commands are the only maintained entry. They do not change Ego's global default profile, do not call `import --profile`, and do not pass `--profile` / `--profileId` to `ego-browser nodejs`. Ego scripts do not inherit shell environment variables; the runner writes the binding into the script.
+
+`profileId` must be the `id` returned by `profiles()`. On the observed runtime that field is the profile id and `name` is only the display label, so an id can literally be `Profile 2` while the label is different. Do not swap those fields, and do not reject a listed id because it looks like a label. `taskSpace(name, { profileId })` applies the id only when creating a space. Resume calls `taskSpace(id)` without `profileId` and refuses to open the page unless `listTaskSpaces()` shows that same id on the existing space. A matching space name is not proof of the profile. Create, resume, and inspect each read the live account again; a mismatch or an unproven identity stops before upload.
+
+Discover profile ids before any package, video, cover, source directory, or account binding exists. This command does not read those files and does not write a job, config, or media path. Exit 0 means the two read-only calls returned; `ready`, `accepted`, and `accountVerified` stay false. Copy `profileId` from the record's `id`. `name` is the display label. An empty `listTaskSpaces()` array is only this inventory: it does not prove a matching space is absent, and it does not verify resume. The global default profile is not changed.
+
+```bash
+node scripts/v2/publisher.mjs --operation diagnose-binding
+```
+
+`scripts/run-safe-platforms.sh --operation diagnose-binding` is the same entry. Do not pass a placeholder package. `--package`, `--job-id`, and `--state-root` are ignored and not written. The command only calls `profiles()` and `listTaskSpaces()`. It does not create, open, switch, or close a space, and it does not open a page or upload. It does receive and print the whole profile list and the whole space list, and it holds the publisher lock while that runs. Copy the returned `profileId`, not the label, into the private config.
+
+`maintenance-diagnose` is not a pure read. It creates one new Ego space named `vp-maint-...` when that exact name is absent, navigates that space only to `https://creator.xiaohongshu.com/new/home` and, after the fresh home text matches the display name and account id, to `https://creator.xiaohongshu.com/new/note-manager`. It writes a record and screenshots under `--maintenance-root` and holds the account-wide publisher lock. It does not open the video publish URL, click, hover, upload, fill a form, claim an existing space, write a production job, or call `releaseForConfirmedPublish`. A name conflict, unknown list shape, or missing profile id stops before `taskSpace`. A home mismatch, login wall, or captcha stops before note-manager and does not create a second space. Controls that are not visible as text are `not-observed`, which is not production acceptance. `ready`, `accepted`, `accountVerified`, and `publishable` stay false. Exit 0 means the new space was created and the home identity text matched, not that a draft is publishable. The 2026-11-08 limited live record in `acceptance-history.md` accepts only that home and note-manager text observation; it does not accept AI declaration, collection, cover, schedule behavior, dedup, media, page closure, or production READY. Public `lite.ego.app` pages describe `useOrCreateTaskSpace` and are a different generation; this command follows the saved 0.6.2.7 `taskSpace` / `newPage` / `goto` / `evaluate` model instead. Navigation is not a claim of zero server-side writes.
+
+The command accepts only a config whose `purpose` is `maintenance-account-observation`. That file has exactly `schemaVersion`, `purpose`, `locale`, and `accounts.xiaohongshu`. It has no `sourceDirectory`, `onboarding`, `declarations`, or platform lists. `node scripts/config.mjs validate-maintenance` must exit 0 with `maintenanceReady: true` and `productionReady: false` before the diagnose command. `node scripts/config.mjs validate` on the same file exits 1. Create, resume, inspect, and the other production commands refuse this file before reading a package or media. A production config is refused by `maintenance-diagnose` before Ego. Write it with `init-maintenance-account` to a new `VIDEO_PUBLISHER_CONFIG` path outside the skill and outside the production config. The shape without a real account is `examples/maintenance-config.example.json`. For profile id `Profile 2`, the stored `labelLikeProfileId` is `true`; the CLI sets that. Do not hand-edit it to `false`.
+
+`validate-maintenance` does not create the maintenance state directory, take the publisher lock, or call Ego. The diagnose command creates `--maintenance-root` only after that check passes. Screenshots are automatic. There is no screenshot flag. After home opens, the file is `<maintenance-root>/<maintenance-space-name>-home.png`. After the home identity matches and note-manager opens, the file is `<maintenance-root>/<maintenance-space-name>-notes.png`. The record is `<maintenance-root>/<maintenance-space-name>.json`. A screenshot error is stored as `screenshotError` and does not click the page. `--close-maintenance-space` is a boolean flag and takes no value. The three CLI identity fields must match `accounts.xiaohongshu`. A mismatch exits before Ego.
+
+```bash
+export VIDEO_PUBLISHER_CONFIG="$HOME/.config/video-publisher-maintenance/config.json"
+node scripts/config.mjs init-maintenance-account \
+  --profile-id "PROFILE_ID_FROM_PROFILES" \
+  --profile-label "PROFILE_LABEL_NOT_THE_ID" \
+  --display-name "ACCOUNT_DISPLAY_NAME" \
+  --account-id "ACCOUNT_ID"
+node scripts/config.mjs validate-maintenance
+node scripts/v2/publisher.mjs \
+  --operation maintenance-diagnose \
+  --profile-id "PROFILE_ID_FROM_PROFILES" \
+  --profile-label "PROFILE_LABEL_NOT_THE_ID" \
+  --display-name "ACCOUNT_DISPLAY_NAME" \
+  --account-id "ACCOUNT_ID" \
+  --maintenance-space-name "vp-maint-account-check" \
+  --maintenance-root "$HOME/.local/state/video-publisher-maintenance"
+```
+
+`--close-maintenance-space` finishes only the handle created in that same process, and only when its name matches. It does not scan or close other spaces. Omit it to keep the new space. Do not point `--maintenance-root` at the production job directory. The CLI identity must match the maintenance file; this command does not fill a missing account from the shell.
+
+The script logs `VIDEO_PUBLISHER_MAINTENANCE:` and writes `<maintenance-root>/<maintenance-space-name>.checkpoint.json` before `finish`. `closeResult.closed` is true only when `finish` returns. If that return is lost, close stays `unknown`; it is not reported as success. A missing marker leaves `sideEffects`, space id, home identity, and note-manager as `unknown`, even when the screenshot files exist. Those files are recorded under `screenshotFilesPresent` and do not set `homeIdentityMatched`. The raw child stdout and stderr are saved only by this version, at `<maintenance-root>/<maintenance-space-name>.ego.log`, with `exitCode`, `----- stdout -----`, and `----- stderr -----`. The 585fe53 run did not write that log or a checkpoint; its retained output is the publisher JSON and the two screenshots.
+
+`maintenance-space-status` uses the same `maintenance-account-observation` config as `maintenance-diagnose`. It does not require `productionReady`. It calls `profiles()` and `listTaskSpaces()` and prints only the exact `--maintenance-space-name`. It does not call `taskSpace`, open a page, or finish. `found: false` means that snapshot did not contain the name. It does not prove the earlier finish succeeded. `found: true` returns `spaceId` when the list has it and does not claim or close the space.
+
+`maintenance-close-space` is the supported way to finish one own maintenance space. It is not a pure read. It first requires one fresh inventory row whose id, exact `vp-maint-` name, `profileId`, and `ownership: "agent"` all match the command. Only then does it call `taskSpace(id)` with no `profileId` and no `claimTaskSpace`. The returned handle must have the same id, the same name, and `ownership: "agent"` before `finish({ keep: [] })`. Installed Ego 0.6.2.7 rejects a boolean `keep`. Its error says `keep` must be `"all"` or an array of unique non-empty page labels. `"all"` retains every page. `[]` names no page to retain. `returnedHandle` records the handle fields actually returned; it is null only when no handle was returned. A missing, ambiguous, mismatched, or unknown inventory row never calls `taskSpace`. A thrown `USER_CONTROL`, a mismatched handle, or a failed finish does not retry and does not call `taskSpace` again. `taskSpace(id)` is still reuse-or-create: if the id disappears between the list and the call, the call can attach or create something else. That handle is not finished. The command does not guarantee the call created nothing. `closeResult` is only the finish receipt. `inventoryCleared` is a separate later `listTaskSpaces` snapshot. Guide v2.2.0 says task spaces persist after the script ends. A later row with the same id, name, `ownership: "agent"`, and profile id is that persisted record, not a failed finish and not proof that pages are open. `pagesClosed` stays `not-observed` because this command does not call `task.pages()`. Exit 0 requires the finish receipt plus either that same persisted row or an absent row. A changed or unreadable later row stays exit 10. `ready`, `accepted`, `accountVerified`, and `publishable` stay false. No page is opened. Do not run this command again merely to chase a missing inventory row.
+
+```bash
+export VIDEO_PUBLISHER_CONFIG="$HOME/.config/video-publisher-maintenance/config.json"
+node scripts/v2/publisher.mjs \
+  --operation maintenance-close-space \
+  --profile-id "Profile 2" \
+  --profile-label "AI" \
+  --display-name "GrokBot看AI" \
+  --account-id "4221066816" \
+  --maintenance-space-name "vp-maint-account-check-585fe53-20261108-1201" \
+  --maintenance-space-id 107 \
+  --maintenance-root "$HOME/.local/state/video-publisher-maintenance"
+```
+
+```bash
+node scripts/config.mjs bind-account xiaohongshu \
+  --profile-id "PASTE_PROFILE_ID_FROM_DIAGNOSE_BINDING" \
+  --profile-label "PASTE_HUMAN_LABEL_NOT_USED_AS_ID" \
+  --display-name "PASTE_ACCOUNT_DISPLAY_NAME" \
+  --account-id "PASTE_ACCOUNT_ID"
+```
+
+Create, resume, and inspect still require a real package, existing media, and a validated config. Then prepare:
+
+```bash
+scripts/run-safe-platforms.sh \
+  --package /absolute/package.json \
+  --platforms xiaohongshu \
+  --job-id SAME-JOB \
+  --state-root /absolute/state-root \
+  --operation create \
+  --no-cleanup-stale-spaces
+```
+
+After a crash, keep the same package, `--job-id`, and `--state-root`, and use `--operation resume --reuse-space --no-cleanup-stale-spaces`. Do not mint a new job when the result is unknown. `--operation inspect` reads the same job again. `--operation diagnose-dedup` records that job-level dedup is not platform history dedup; it does not open note management and cannot return READY. The publisher lock stays under the fixed lock root and still blocks a second job that uses another `--state-root`.
+
+`xhsSchedule` is validated as an Asia/Shanghai civil time. It does not authorize `releaseForConfirmedPublish` or a click on `发布` or `定时发布`. A missing or unproven schedule control is `SCHEDULE_CONTROL_UNVERIFIED`, which does not mean the platform lacks scheduling. AI declaration, collection, prose, and the 3:4 cover require a fresh readback; a click receipt is not field success. Platform history dedup stays `PLATFORM_HISTORY_UNVERIFIED` until a later live note-management read exists. Do not treat that pending state as acceptance.
+
+Final publish, only after a separate explicit authorization for this job and these platforms:
+
+1. `--operation inspect` on the same job still reports that platform `READY`, with the same draft identity and a fresh account match.
+2. The page guard is armed, `blockedAttempts` is 0, and `finalPublishClicked` is false.
+3. Call `releaseForConfirmedPublish()` once and require `ok: true`.
+4. Click one final control that matches the authorized action. A configured schedule time does not select or authorize that control.
+5. If the platform result cannot be read back, report it as unconfirmed. Do not click again and do not create another draft.
 
 Replace covers on an existing READY draft without uploading the video again:
 

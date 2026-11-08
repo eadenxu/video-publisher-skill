@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,7 +13,7 @@ import {
   validateXiaohongshuPackage,
   validateYoutubePackage,
 } from "../lib/content-package.mjs";
-import { loadConfig } from "../lib/config.mjs";
+import { configStatus, loadConfig } from "../lib/config.mjs";
 import { inspectMediaFile, validateMediaForPlatform } from "../lib/media.mjs";
 import { buildIdentity } from "./lib/identity.mjs";
 import { acquireJobLock, JobBusyError, resolvePublisherLockDirectory } from "./lib/job-lock.mjs";
@@ -27,8 +28,26 @@ import {
   buildSpaceName,
   cleanupTaskSpaces,
   retireCurrentSpaces,
+  runEgoScript,
   shouldRotateSpaces,
 } from "./lib/spaces.mjs";
+import {
+  assertMaintenanceCloseScript,
+  assertMaintenanceScript,
+  assertMaintenanceSpaceStatusScript,
+  bindingDiagnosticScript,
+  buildMaintenanceCloseScript,
+  buildMaintenanceDiagnoseScript,
+  buildMaintenanceSpaceStatusScript,
+  describeProfileInventory,
+  describeSpaceInventory,
+  explainDiscoveryConfig,
+  parseMaintenanceOutput,
+  parseMaintenanceSpaceStatus,
+  sameAccountBinding,
+  sanitizeDiagnostic,
+} from "./lib/account-binding.mjs";
+import { evaluatePlatformDedup, normalizeXhsRequirements } from "./lib/xhs-fields.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.join(os.homedir(), ".video-publisher", "v2-jobs");
@@ -195,14 +214,487 @@ async function migrateLegacyIdentity(store, state, identity, args) {
   await store.save();
 }
 
+async function runBindingDiagnostic() {
+  const script = bindingDiagnosticScript();
+  if (/taskSpace\s*\(|openOrReuseTab|page\.goto|\bclick\s*\(/.test(script)) {
+    throw new Error("binding diagnostic script must stay read-only");
+  }
+  let result;
+  try {
+    result = await runEgoScript(script);
+  } catch (error) {
+    return { ok: false, captured: false, accepted: false, liveVerified: false, pageOpened: false, taskSpaceCalled: false, error: String(error?.message || error) };
+  }
+  const match = `${result.stdout}\n${result.stderr}`.match(/VIDEO_PUBLISHER_BINDING_DIAGNOSTIC:(\{.*\})/);
+  if (!match || result.code !== 0) {
+    return {
+      ok: false,
+      captured: false,
+      accepted: false,
+      liveVerified: false,
+      pageOpened: false,
+      taskSpaceCalled: false,
+      exitCode: result.code,
+      detail: `${result.stderr}\n${result.stdout}`.trim().slice(-800),
+    };
+  }
+  try {
+    const payload = JSON.parse(match[1]);
+    const profiles = sanitizeDiagnostic(payload.profiles);
+    const spaces = sanitizeDiagnostic(payload.spaces);
+    return {
+      ok: true,
+      captured: true,
+      accepted: false,
+      accountVerified: false,
+      ready: false,
+      liveVerified: false,
+      livePageAcceptance: "pending",
+      defaultProfileChanged: false,
+      pageOpened: payload.pageOpened === true,
+      taskSpaceCalled: payload.taskSpaceCalled === true,
+      spaceCreated: false,
+      spaceSwitched: false,
+      spaceClosed: false,
+      uploadPerformed: false,
+      profiles,
+      spaces,
+      profileInventory: describeProfileInventory(profiles),
+      spaceInventory: describeSpaceInventory(spaces),
+    };
+  } catch (error) {
+    return { ok: false, captured: false, accepted: false, liveVerified: false, error: `diagnostic payload was not JSON: ${String(error?.message || error)}` };
+  }
+}
+
 async function persistKeepSpace(store, state, args, closeCurrent) {
   if (args.keepSpace) state.keepSpace = true;
   else if (closeCurrent) state.keepSpace = false;
   await store.save();
 }
 
+async function runMetadataOnlyBindingDiagnosis(args) {
+  const status = configStatus();
+  const release = acquireJobLock(resolvePublisherLockDirectory(), {
+    jobId: "diagnose-binding",
+    packagePath: "",
+    scope: "publisher",
+  });
+  let diagnostic;
+  try {
+    diagnostic = await runBindingDiagnostic();
+  } finally {
+    release();
+  }
+  const summary = {
+    schemaVersion: 4,
+    operation: "diagnose-binding",
+    ready: false,
+    accepted: false,
+    accountVerified: false,
+    finalPublishAuthorized: false,
+    scheduleAuthorizesFinalPublish: false,
+    defaultProfileChanged: false,
+    stateWritten: false,
+    pathsWritten: [],
+    package: {
+      supplied: Boolean(args.packagePath),
+      read: false,
+      mediaPreflight: "not-run",
+      note: args.packagePath
+        ? "The package path was ignored. This diagnostic does not open video or cover files and does not write a job."
+        : "No package is required.",
+    },
+    config: explainDiscoveryConfig({
+      exists: status.exists,
+      onboardingRequired: status.onboardingRequired,
+      errors: status.errors,
+      warnings: status.warnings,
+      binding: args.accountBinding,
+    }),
+    stateRootSupplied: process.argv.includes("--state-root"),
+    diagnostic,
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  if (diagnostic.captured !== true) process.exitCode = 10;
+}
+
+function maintenanceLibrarySource() {
+  const source = fs.readFileSync(path.join(DIR, "lib", "account-binding.mjs"), "utf8");
+  const cut = source.indexOf("export function assertMaintenanceScript");
+  if (cut < 0) throw new Error("maintenance planner is missing from account-binding.mjs");
+  return source.slice(0, cut).replace(/^export /gm, "");
+}
+
+function reportedFlag(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  return "unknown";
+}
+
+function readMaintenanceCheckpoint(file, runId) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (!parsed || typeof parsed !== "object" || parsed.runId !== runId) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function mergeMaintenanceEvidence(parsed, checkpoint) {
+  const payload = { ...(parsed.payload || {}) };
+  if (payload.sideEffects !== "unknown") return { payload, evidenceSource: "ego-output", checkpointConflict: false };
+  if (!checkpoint) return { payload, evidenceSource: "none", checkpointConflict: false };
+  return {
+    payload: { ...checkpoint, sideEffects: "checkpoint" },
+    evidenceSource: "checkpoint",
+    checkpointConflict: false,
+  };
+}
+
+function maintenanceCloseFact(payload, closeAfter) {
+  const closeResult = payload.closeResult || {};
+  const reason = closeResult.reason || "";
+  if (closeResult.closed === true && reason === "finish-returned") {
+    return { closed: true, reason };
+  }
+  if (closeResult.closed === false && reason && reason !== "pending" && reason !== "unknown") {
+    return { closed: false, reason, error: closeResult.error || "" };
+  }
+  if (!closeAfter && payload.sideEffects !== "unknown" && payload.sideEffects !== "checkpoint") {
+    return { closed: false, reason: reason || "kept" };
+  }
+  if (!closeAfter && payload.sideEffects === "checkpoint" && reason === "kept") {
+    return { closed: false, reason: "kept" };
+  }
+  return { closed: "unknown", reason: reason || "close-result-not-returned" };
+}
+
+function writeEgoCapture(file, result) {
+  const body = [
+    `exitCode: ${result.code ?? ""}`,
+    "----- stdout -----",
+    result.stdout || "",
+    "----- stderr -----",
+    result.stderr || "",
+    "",
+  ].join("\n");
+  fs.writeFileSync(file, body, { mode: 0o600 });
+}
+
+async function runMaintenanceDiagnose(args) {
+  fs.mkdirSync(args.maintenanceRoot, { recursive: true, mode: 0o700 });
+  const runId = crypto.randomBytes(8).toString("hex");
+  const checkpointPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.checkpoint.json`);
+  const egoLogPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.ego.log`);
+  const screenshotPaths = {
+    home: path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}-home.png`),
+    noteManager: path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}-notes.png`),
+  };
+  const input = {
+    runId,
+    binding: {
+      profileId: args.accountBinding.profileId,
+      displayName: args.accountBinding.displayName,
+      accountId: args.accountBinding.accountId,
+      profileLabel: args.accountBinding.profileLabel || "",
+    },
+    spaceName: args.maintenanceSpaceName,
+    closeAfter: args.closeMaintenanceSpace === true,
+    checkpointPath,
+    screenshots: screenshotPaths,
+  };
+  const runner = buildMaintenanceDiagnoseScript(input);
+  assertMaintenanceScript(runner);
+  const script = `${maintenanceLibrarySource()}\n${runner}`;
+  const release = acquireJobLock(resolvePublisherLockDirectory(), {
+    jobId: "maintenance-diagnose",
+    packagePath: "",
+    scope: "publisher",
+  });
+  let result = { code: null, stdout: "", stderr: "" };
+  let parsed = { ok: false, error: "ego output was not captured", payload: { sideEffects: "unknown" } };
+  try {
+    result = await runEgoScript(script);
+    writeEgoCapture(egoLogPath, result);
+    parsed = parseMaintenanceOutput(`${result.stdout}\n${result.stderr}`);
+    if (!parsed.ok && parsed.payload?.sideEffects !== "unknown") {
+      parsed = { ...parsed, exitCode: result.code, detail: `${result.stderr}\n${result.stdout}`.trim().slice(-800) };
+    } else if (!parsed.ok) {
+      parsed = { ...parsed, exitCode: result.code, detail: `${result.stderr}\n${result.stdout}`.trim().slice(-800) };
+    }
+  } catch (error) {
+    writeEgoCapture(egoLogPath, { code: null, stdout: "", stderr: String(error?.stack || error) });
+    parsed = { ok: false, error: String(error?.message || error), payload: { sideEffects: "unknown" }, exitCode: null };
+  } finally {
+    release();
+  }
+  const checkpoint = readMaintenanceCheckpoint(checkpointPath, runId);
+  const merged = mergeMaintenanceEvidence(parsed, checkpoint);
+  const payload = merged.payload;
+  if (parsed.payload?.sideEffects !== "unknown" && checkpoint) {
+    if (checkpoint.spaceId != null && payload.spaceId != null && String(checkpoint.spaceId) !== String(payload.spaceId)) {
+      merged.checkpointConflict = true;
+    }
+  }
+  const closeResult = maintenanceCloseFact(payload, args.closeMaintenanceSpace === true);
+  const screenshotFilesPresent = {
+    home: fs.existsSync(screenshotPaths.home),
+    notes: fs.existsSync(screenshotPaths.noteManager),
+  };
+  const record = {
+    schemaVersion: 2,
+    kind: "maintenance-diagnose",
+    runId,
+    pureReadOnly: false,
+    publisherRetried: false,
+    evidenceSource: merged.evidenceSource,
+    checkpointConflict: merged.checkpointConflict === true,
+    sideEffects: payload.sideEffects || "unknown",
+    createsOwnSpace: reportedFlag(payload.created),
+    navigatesAllowlistedAccountPages: reportedFlag(payload.homeOpened),
+    ready: false,
+    accepted: false,
+    accountVerified: false,
+    publishable: false,
+    homeIdentityMatched: reportedFlag(payload.homeIdentityMatched),
+    noteManagerOpened: reportedFlag(payload.noteManagerOpened),
+    publishUrlOpened: reportedFlag(payload.publishUrlOpened),
+    mediaRead: false,
+    finalGuardReleaseCalled: reportedFlag(payload.finalGuardReleaseCalled),
+    spaceId: payload.spaceId == null || merged.checkpointConflict ? null : payload.spaceId,
+    spaceIdState: payload.spaceId == null || merged.checkpointConflict ? "unknown" : "returned",
+    closeResult,
+    controls: payload.controls || null,
+    screenshotFilesPresent,
+    screenshotFilesDoNotVerifyIdentity: true,
+    productionStateWritten: false,
+    egoOutput: {
+      path: egoLogPath,
+      exitCode: result.code,
+      stdoutBytes: Buffer.byteLength(result.stdout || ""),
+      stderrBytes: Buffer.byteLength(result.stderr || ""),
+    },
+    checkpointPath: fs.existsSync(checkpointPath) ? checkpointPath : "",
+    helpPrerequisites: [
+      "Saved guide v2.2.0 documents taskSpace as reuse-or-create. This command creates one new named space; it does not read an existing space id.",
+      "Home and note-manager URLs come from one historical 0.6.2.7 run, not from a guarantee that navigation has zero server-side writes.",
+      "ownership values are not enumerated in that guide.",
+      "Public lite.ego.app pages use useOrCreateTaskSpace and are not this command's contract.",
+      "Controls not visible as text stay not-observed. That is not production acceptance.",
+      "A missing marker leaves side effects unknown. Screenshot files do not set homeIdentityMatched.",
+      "closeResult.closed is true only after finish returns. pending or a lost return stays unknown.",
+    ],
+    observed: payload,
+    error: parsed.ok ? "" : parsed.error,
+  };
+  const recordPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.json`);
+  fs.writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify({ ...record, maintenanceRecord: recordPath }, null, 2));
+  const safeStop = payload.created === true
+    && payload.homeIdentityMatched === true
+    && payload.publishUrlOpened === false
+    && payload.finalGuardReleaseCalled === false
+    && payload.retried === false
+    && payload.sideEffects !== "unknown"
+    && (!args.closeMaintenanceSpace || closeResult.closed === true);
+  if (!safeStop) process.exitCode = 10;
+}
+
+async function runMaintenanceClose(args) {
+  fs.mkdirSync(args.maintenanceRoot, { recursive: true, mode: 0o700 });
+  const runId = crypto.randomBytes(8).toString("hex");
+  const checkpointPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.close.checkpoint.json`);
+  const egoLogPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.close.ego.log`);
+  const input = {
+    runId,
+    spaceName: args.maintenanceSpaceName,
+    spaceId: Number(args.maintenanceSpaceId),
+    profileId: args.accountBinding.profileId,
+    checkpointPath,
+  };
+  const runner = buildMaintenanceCloseScript(input);
+  assertMaintenanceCloseScript(runner);
+  const script = `${maintenanceLibrarySource()}\n${runner}`;
+  const release = acquireJobLock(resolvePublisherLockDirectory(), {
+    jobId: "maintenance-close-space",
+    packagePath: "",
+    scope: "publisher",
+  });
+  let result = { code: null, stdout: "", stderr: "" };
+  let parsed = { ok: false, error: "ego output was not captured", payload: { sideEffects: "unknown" } };
+  try {
+    result = await runEgoScript(script);
+    writeEgoCapture(egoLogPath, result);
+    parsed = parseMaintenanceOutput(`${result.stdout}\n${result.stderr}`);
+  } catch (error) {
+    writeEgoCapture(egoLogPath, { code: null, stdout: "", stderr: String(error?.stack || error) });
+    parsed = { ok: false, error: String(error?.message || error), payload: { sideEffects: "unknown" }, exitCode: null };
+  } finally {
+    release();
+  }
+  const checkpoint = readMaintenanceCheckpoint(checkpointPath, runId);
+  const merged = mergeMaintenanceEvidence(parsed, checkpoint);
+  const payload = merged.payload;
+  const closeResult = maintenanceCloseFact(payload, true);
+  const inventoryAfter = payload.inventoryAfter && typeof payload.inventoryAfter === "object"
+    ? payload.inventoryAfter
+    : { checked: false };
+  const inventoryCleared = inventoryAfter.checked === true && inventoryAfter.code === "SPACE_ABSENT"
+    ? true
+    : inventoryAfter.checked === true
+      ? false
+      : "unknown";
+  const samePersistedSpace = inventoryAfter.code === "STILL_PRESENT"
+    && inventoryAfter.matchCount === 1
+    && String(inventoryAfter.spaceId) === String(args.maintenanceSpaceId)
+    && inventoryAfter.spaceName === args.maintenanceSpaceName
+    && inventoryAfter.ownership === "agent"
+    && inventoryAfter.profileId === args.accountBinding.profileId;
+  const finishAccepted = payload.handleMatched === true
+    && closeResult.closed === true
+    && closeResult.reason === "finish-returned"
+    && Array.isArray(payload.closeResult?.keep)
+    && payload.closeResult.keep.length === 0
+    && payload.retried === false
+    && payload.pageOpened === false;
+  const record = {
+    schemaVersion: 1,
+    operation: "maintenance-close-space",
+    runId,
+    pureReadOnly: false,
+    publisherRetried: false,
+    evidenceSource: merged.evidenceSource,
+    sideEffects: payload.sideEffects || "unknown",
+    ready: false,
+    accepted: false,
+    accountVerified: false,
+    publishable: false,
+    expectedSpaceId: Number(args.maintenanceSpaceId),
+    expectedSpaceName: args.maintenanceSpaceName,
+    taskSpaceCalled: reportedFlag(payload.taskSpaceCalled),
+    handleMatched: reportedFlag(payload.handleMatched),
+    pageOpened: reportedFlag(payload.pageOpened),
+    spaceId: payload.handleMatched === true ? payload.spaceId : null,
+    spaceIdState: payload.handleMatched === true && payload.spaceId != null ? "returned" : "unknown",
+    returnedHandle: payload.taskSpaceCalled === true && (payload.handleMatched === true || payload.decisionCode === "HANDLE_MISMATCH")
+      ? {
+          spaceId: payload.spaceId ?? null,
+          spaceName: payload.spaceName ?? null,
+          ownership: payload.ownership ?? null,
+        }
+      : null,
+    decisionCode: payload.decisionCode || "",
+    closeResult,
+    inventoryAfter,
+    inventoryCleared,
+    spaceRecordPersists: samePersistedSpace ? true : inventoryCleared === true ? false : "unknown",
+    pagesClosed: "not-observed",
+    finishAccepted,
+    substituteCreated: payload.substituteCreated || (payload.taskSpaceCalled === true ? "not-observed" : false),
+    productionStateWritten: false,
+    egoOutput: {
+      path: egoLogPath,
+      exitCode: result.code,
+      stdoutBytes: Buffer.byteLength(result.stdout || ""),
+      stderrBytes: Buffer.byteLength(result.stderr || ""),
+    },
+    checkpointPath: fs.existsSync(checkpointPath) ? checkpointPath : "",
+    helpPrerequisites: [
+      "taskSpace(id) is reuse-or-create. This command calls it only after one fresh inventory row matches the expected id, exact vp-maint name, profile id, and ownership agent.",
+      "A gap remains between that list and the call. The call can resume the space or, if the id disappeared, create or attach something else. A mismatched handle is not finished and is not retried.",
+      "This is not a pure read and does not guarantee that the call created nothing.",
+      "Guide v2.2.0 says task spaces persist after the script. finish({ keep: [] }) does not delete the listTaskSpaces row. STILL_PRESENT with the same id, name, agent ownership, and profile is the observed persistence, not a failed finish.",
+      "pagesClosed stays not-observed. This command does not call task.pages(). A remaining inventory row does not show whether pages are open.",
+      "closeResult is the finish receipt. inventoryCleared is a later listTaskSpaces snapshot. One does not prove the other.",
+      "claimTaskSpace is not used. No page is opened.",
+      "Installed Ego 0.6.2.7 rejects finish keep:false. keep must be \"all\" or an array of unique non-empty page labels. This close passes keep:[] so no page label is retained.",
+    ],
+    error: parsed.ok ? "" : parsed.error,
+  };
+  const recordPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.close.json`);
+  fs.writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
+  console.log(JSON.stringify({ ...record, maintenanceRecord: recordPath }, null, 2));
+  if (!(finishAccepted && (inventoryCleared === true || samePersistedSpace))) {
+    process.exitCode = 10;
+  }
+}
+
+async function runMaintenanceSpaceStatus(args) {
+  const script = buildMaintenanceSpaceStatusScript({
+    spaceName: args.maintenanceSpaceName,
+    profileId: args.accountBinding.profileId,
+  });
+  assertMaintenanceSpaceStatusScript(script);
+  const release = acquireJobLock(resolvePublisherLockDirectory(), {
+    jobId: "maintenance-space-status",
+    packagePath: "",
+    scope: "publisher",
+  });
+  let result;
+  try {
+    result = await runEgoScript(script);
+  } finally {
+    release();
+  }
+  const parsed = parseMaintenanceSpaceStatus(`${result.stdout}\n${result.stderr}`);
+  const payload = parsed.payload || {};
+  const summary = {
+    schemaVersion: 1,
+    operation: "maintenance-space-status",
+    ready: false,
+    accepted: false,
+    accountVerified: false,
+    publishable: false,
+    publisherRetried: false,
+    taskSpaceCalled: false,
+    pageOpened: false,
+    finishCalled: false,
+    closeConfirmed: false,
+    spaceName: args.maintenanceSpaceName,
+    found: !parsed.ok ? "unknown" : payload.found === true ? true : payload.found === false ? false : "unknown",
+    ambiguous: parsed.ok ? payload.ambiguous === true : "unknown",
+    spaceId: parsed.ok && payload.found === true ? payload.spaceId : null,
+    spaceIdState: parsed.ok && payload.found === true && payload.spaceId != null ? "returned" : "unknown",
+    ownership: parsed.ok ? payload.ownership : null,
+    ownershipKnown: parsed.ok ? payload.ownershipKnown === true : false,
+    targetProfileListed: parsed.ok ? payload.targetProfileListed === true : "unknown",
+    profileIdMatches: parsed.ok ? payload.profileIdMatches : null,
+    extraKeys: parsed.ok && Array.isArray(payload.extraKeys) ? payload.extraKeys : [],
+    listedFields: parsed.ok && payload.listedFields && typeof payload.listedFields === "object" ? payload.listedFields : {},
+    pagesClosed: "not-observed",
+    inventoryAccessed: ["profiles", "listTaskSpaces"],
+    otherSpacesHidden: true,
+    otherProfilesHidden: true,
+    meaning: "Inventory match for one exact name. Absence does not prove finish succeeded. Presence does not claim, resume, or close the space. This command cannot close vp-maint-account-check-585fe53-20261108-1201 without taskSpace reuse-or-create.",
+    error: parsed.ok ? "" : parsed.error,
+    egoExitCode: result.code,
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  if (!parsed.ok || payload.taskSpaceCalled === true || payload.finishCalled === true || payload.closeConfirmed === true) {
+    process.exitCode = 10;
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.diagnosis === "maintenance-diagnose") {
+    await runMaintenanceDiagnose(args);
+    return;
+  }
+  if (args.diagnosis === "maintenance-space-status") {
+    await runMaintenanceSpaceStatus(args);
+    return;
+  }
+  if (args.diagnosis === "maintenance-close-space") {
+    await runMaintenanceClose(args);
+    return;
+  }
+  if (args.diagnosis === "diagnose-binding") {
+    await runMetadataOnlyBindingDiagnosis(args);
+    return;
+  }
   if (args.cleanupOnly) {
     let state = { jobId: args.jobId || "", platforms: {}, retiredSpaces: [] };
     let statePath = "";
@@ -279,6 +771,9 @@ async function main() {
   if (args.operation !== "replace-cover") await migrateLegacyIdentity(store, state, identity, args);
   const incomingStatus = state.status;
   const incomingInProgress = IN_PROGRESS_STATUSES.includes(incomingStatus);
+  if (state.accountBinding && args.accountBinding && !sameAccountBinding(state.accountBinding, args.accountBinding)) {
+    throw new UsageError("Job account binding does not match the current configuration. Refusing to retarget this job.");
+  }
   if (args.operation === "auto" && stateExisted && incomingStatus === "ready") {
     throw new UsageError(`Job ${jobId} is already READY. Use --operation inspect, --operation replace-cover, or --operation repost --confirm-new-copy.`);
   }
@@ -335,6 +830,56 @@ async function main() {
     console.error(`[video-publisher-v2] restored corrupt job state from atomic backup; preserved=${store.lastRecovery.corruptPath}`);
   }
   if (state.fingerprint !== identity.fingerprint) throw new Error(`Job ${jobId} belongs to another package`);
+  if (args.accountBinding && args.platforms.includes("xiaohongshu")) {
+    state.accountBinding = {
+      platform: "xiaohongshu",
+      profileId: args.accountBinding.profileId,
+      displayName: args.accountBinding.displayName,
+      accountId: args.accountBinding.accountId,
+    };
+  }
+  if (args.platforms.includes("xiaohongshu")) {
+    state.requestedFields = {
+      ...(state.requestedFields || {}),
+      xiaohongshu: normalizeXhsRequirements(pkg),
+      scheduleAuthorizesFinalPublish: false,
+    };
+  }
+  if (args.diagnosis) {
+    if (args.diagnosis !== "diagnose-dedup") {
+      throw new UsageError("diagnose-binding does not create job state");
+    }
+    const diagnostic = {
+        ok: false,
+        accepted: false,
+        liveVerified: false,
+        jobDedupUsed: false,
+        jobDedupSatisfiesPlatformDedup: false,
+        source: "not-queried",
+        queries: state.requestedFields?.xiaohongshu?.dedup?.queries || [],
+        judgement: evaluatePlatformDedup(
+          { required: true, queries: state.requestedFields?.xiaohongshu?.dedup?.queries || [] },
+          { source: "not-queried", liveVerified: false, jobDedupUsed: false },
+        ),
+      };
+    state.diagnostics = { ...(state.diagnostics || {}), [args.diagnosis]: { ...diagnostic, recordedAt: new Date().toISOString() } };
+    state.status = incomingStatus === "ready" ? "ready" : (incomingInProgress ? incomingStatus : "inspected");
+    await store.save();
+    await store.close();
+    console.log(JSON.stringify({
+      schemaVersion: 4,
+      jobId,
+      operation: args.diagnosis,
+      ready: false,
+      accepted: false,
+      finalPublishAuthorized: false,
+      scheduleAuthorizesFinalPublish: false,
+      statePath: store.statePath,
+      diagnostic,
+    }, null, 2));
+    if (diagnostic.ok !== true || diagnostic.accepted === false) process.exitCode = args.diagnosis === "diagnose-binding" && diagnostic.captured === true ? 0 : 10;
+    return;
+  }
   for (const platform of args.platforms) state.platforms[platform] ||= { status: "new", taskSpaceId: null, taskSpaceName: null, videoReceipt: null, receipts: {}, verdict: null, history: [] };
   for (const platform of args.platforms) {
     const item = state.platforms[platform];
@@ -607,6 +1152,8 @@ function summary(state, platforms, statePath) {
     operation: state.revisions?.at(-1)?.operation || "unknown",
     status: state.status,
     ready: platforms.every(platform => state.platforms[platform].verdict?.ready === true),
+    finalPublishAuthorized: false,
+    scheduleAuthorizesFinalPublish: false,
     statePath,
     scheduler: state.scheduler,
     platforms: Object.fromEntries(platforms.map(platform => {

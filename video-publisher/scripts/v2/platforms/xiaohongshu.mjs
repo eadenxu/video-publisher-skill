@@ -3,6 +3,66 @@ const xhsTopics = pkg.xhsTopics;
 const xhsVideoName = videoPath.split(/[\\/]/).pop();
 const xhsCustomCover = pkg.cover?.uploadCustomCover === true;
 const xhsCoverPath = String(pkg.cover?.vertical3x4Path || '');
+const xhsSpec = (typeof xhsRequirements !== "undefined" && xhsRequirements) ? xhsRequirements : {
+  aiSynthesis: { required: false },
+  collection: { required: false },
+  prose: { required: false },
+  dedup: { required: false },
+  schedule: { required: false, authorizesFinalPublish: false },
+};
+
+function xhsAccountBlocker(inspection) {
+  const gate = inspection?.gates?.accountIdentity;
+  if (!gate || gate.ok) return null;
+  const code = gate.evidence?.code || "ACCOUNT_UNVERIFIED";
+  return typedBlocker(code, gate.evidence?.message || "小红书账号绑定未证明", {
+    requiresUser: code === "ACCOUNT_MISMATCH" || code === "ACCOUNT_AMBIGUOUS",
+    evidence: gate.evidence,
+  });
+}
+
+async function readXhsAccountGate() {
+  if (typeof accountBinding === "undefined" || !accountBinding) return okGate({ required: false });
+  const observation = await js(accountSnapshotExpression(accountBinding.displayName, accountBinding.accountId));
+  return gateFromJudgement(compareAccountObservation(accountBinding, observation));
+}
+
+async function readXhsExtraGates() {
+  const aiObservation = xhsSpec.aiSynthesis?.required ? await js(labeledSwitchExpression(xhsSpec.aiSynthesis.label)) : null;
+  const collectionObservation = xhsSpec.collection?.required ? await js(collectionExpression(xhsSpec.collection.name)) : null;
+  const scheduleObservation = xhsSpec.schedule?.required
+    ? await js(scheduleControlExpression(xhsSpec.schedule.local || "", xhsSpec.schedule.publishAt || ""))
+    : null;
+  const proseObservation = xhsSpec.prose?.required ? await js(proseExpression(xhsSpec.prose.text, xhsTopics)) : null;
+  const dedupObservation = xhsSpec.dedup?.required
+    ? { liveVerified: false, source: "not-queried", jobDedupUsed: false }
+    : null;
+  return {
+    aiSynthesis: gateFromJudgement(evaluateLabeledSwitch(xhsSpec.aiSynthesis, aiObservation)),
+    collection: gateFromJudgement(evaluateCollection(xhsSpec.collection, collectionObservation)),
+    schedule: gateFromJudgement(evaluateScheduleControl(xhsSpec.schedule, scheduleObservation)),
+    prose: gateFromJudgement(evaluateProse(xhsSpec.prose, proseObservation)),
+    platformDedup: gateFromJudgement(evaluatePlatformDedup(xhsSpec.dedup, dedupObservation)),
+  };
+}
+
+async function ensureXhsAiDeclaration() {
+  if (!xhsSpec.aiSynthesis?.required) return { ok: true, skipped: true, clickAccepted: false };
+  let observation = await js(labeledSwitchExpression(xhsSpec.aiSynthesis.label));
+  let judged = evaluateLabeledSwitch(xhsSpec.aiSynthesis, observation);
+  if (judged.ok) return { ...judged, clicked: false };
+  if (observation?.unique === true && observation?.selector) {
+    try { await click(observation.selector, { label: "enable xhs ai synthesis declaration" }); }
+    catch (error) {
+      return { ok: false, code: "AI_DECLARATION_UNVERIFIED", message: `AI 声明控件未能点击: ${String(error?.message || error)}`, evidence: { clickAccepted: false, livePageAcceptance: "pending" } };
+    }
+    await wait(0.5);
+    observation = await js(labeledSwitchExpression(xhsSpec.aiSynthesis.label));
+    judged = evaluateLabeledSwitch(xhsSpec.aiSynthesis, observation);
+    return { ...judged, clicked: true };
+  }
+  return { ...judged, clicked: false };
+}
 
 function xhsCoverCropMatches(probe) {
   return probe?.actual === '3:4' && probe?.controlVisible === true;
@@ -120,6 +180,8 @@ async function inspectXiaohongshu() {
     return { text: text.slice(0, 2600), title, editorText, selected, topicCounts, plainResidue, duplicate, originalEnabled, activeDialogs, coverBg, filenameVisible, uploaded, uploading, failed, loginRequired, earlyMutation }
   })(${JSON.stringify(xhsVideoName)}, ${JSON.stringify(xhsTitle)}, ${JSON.stringify(xhsTopics)})`);
   const buttons = await inspectFinalButtons(/^(发布|发布笔记)$/);
+  const accountIdentity = await readXhsAccountGate();
+  const extras = await readXhsExtraGates();
   const identityOk = !state.uploaded || state.filenameVisible || state.title === xhsTitle;
   const receipt = expectedReceipts.cover || null;
   const receiptMatches = xhsCoverReceiptMatches(receipt,state.coverBg);
@@ -130,6 +192,7 @@ async function inspectXiaohongshu() {
   return {
     gates: {
       authenticated: state.loginRequired ? failedGate({ loginRequired: true }) : okGate({ url: PLATFORM_URLS.xiaohongshu }),
+      accountIdentity,
       draftIdentity: identityOk ? okGate({ expectedName: xhsVideoName, filenameVisible: state.filenameVisible }) : failedGate({ foreign: true, expectedName: xhsVideoName, actualTitle: state.title }),
       video: state.uploaded && !state.failed && !state.uploading
         ? okGate({ filename: xhsVideoName, stable: true })
@@ -138,7 +201,12 @@ async function inspectXiaohongshu() {
       tags: state.selected.length === xhsTopics.length && !state.plainResidue.length && !state.duplicate.length
         ? okGate({ requested: xhsTopics, selected: state.selected, topicCounts: state.topicCounts })
         : failedGate({ requested: xhsTopics, selected: state.selected, plainResidue: state.plainResidue, duplicate: state.duplicate, topicCounts: state.topicCounts }),
-      original: state.originalEnabled ? okGate({ enabled: true }) : failedGate({ enabled: false }),
+      original: state.originalEnabled ? okGate({ enabled: true, basis: xhsSpec.originalityBasis || "" }) : failedGate({ enabled: false, basis: xhsSpec.originalityBasis || "" }),
+      aiSynthesis: extras.aiSynthesis,
+      collection: extras.collection,
+      prose: extras.prose,
+      schedule: extras.schedule,
+      platformDedup: extras.platformDedup,
       cover: coverOk
         ? okGate({ custom: xhsCustomCover, background: state.coverBg, receipt })
         : failedGate({ custom: xhsCustomCover, background: state.coverBg, receipt, reason: xhsCustomCover && !receipt ? 'custom cover receipt missing' : 'cover not verified' }),
@@ -169,6 +237,8 @@ async function waitXiaohongshuUploadCompletion(mode) {
 
 async function uploadXiaohongshu() {
   const before = await inspectXiaohongshu();
+  const accountBlock = xhsAccountBlocker(before);
+  if (accountBlock) return { ...before, blocker: accountBlock };
   if (before.gates.video.ok) return { ...before, actions: { upload: { mode: 'already_ready' } } };
   if (!before.gates.draftIdentity.ok) {
     return { ...before, blocker: typedBlocker('FOREIGN_DRAFT', '小红书当前编辑器属于其他视频草稿', { evidence: before.gates.draftIdentity.evidence }) };
@@ -213,6 +283,8 @@ async function waitXiaohongshuEarlyMutationReady(mode) {
 
 async function startXiaohongshuUpload() {
   const before = await inspectXiaohongshu();
+  const accountBlock = xhsAccountBlocker(before);
+  if (accountBlock) return { ...before, blocker: accountBlock };
   if (before.gates.video.ok) return { ...before, actions: { upload: { mode: 'already_ready', stage: 'complete', earlyMutationReady: true } } };
   if (!before.gates.authenticated.ok) {
     return { ...before, blocker: typedBlocker('AUTH_REQUIRED', '小红书登录状态失效', { requiresUser: true, evidence: before.gates.authenticated.evidence }) };
@@ -636,6 +708,9 @@ async function ensureXiaohongshuEarlyMetadata(before) {
   if (!current.gates.title.ok) {
     return { ok: false, actions, current, blocker: typedBlocker('ACTION_FAILED', '小红书标题没有持久化', { evidence: current.gates.title.evidence }) };
   }
+  if (xhsSpec.prose?.required && !current.gates.prose?.ok) {
+    return { ok: false, actions, current, blocker: typedBlocker(current.gates.prose?.evidence?.code || 'PROSE_NOT_RETAINED', current.gates.prose?.evidence?.message || '小红书正文没有被新鲜读回', { evidence: current.gates.prose?.evidence }) };
+  }
   if (!current.gates.tags.ok) actions.tags = await rebuildXhsTopics();
   if (actions.tags && !actions.tags.ok) {
     current = await inspectXiaohongshu();
@@ -647,6 +722,8 @@ async function ensureXiaohongshuEarlyMetadata(before) {
 
 async function prefillXiaohongshu() {
   const before = await inspectXiaohongshu();
+  const accountBlock = xhsAccountBlocker(before);
+  if (accountBlock) return { ...before, blocker: accountBlock };
   if (!before.gates.authenticated.ok) {
     return { ...before, blocker: typedBlocker('AUTH_REQUIRED', '小红书登录状态失效', { requiresUser: true, evidence: before.gates.authenticated.evidence }) };
   }
@@ -664,12 +741,19 @@ async function prefillXiaohongshu() {
 
 async function mutateXiaohongshu() {
   const before = await inspectXiaohongshu();
+  const accountBlock = xhsAccountBlocker(before);
+  if (accountBlock) return { ...before, blocker: accountBlock };
   if (!before.gates.video.ok) return { ...before, blocker: typedBlocker('STATE_AMBIGUOUS', '小红书没有可修复的已上传视频') };
   const metadata = await ensureXiaohongshuEarlyMetadata(before);
   if (!metadata.ok) return { ...metadata.current, actions: metadata.actions, blocker: metadata.blocker };
   const actions = { ...metadata.actions };
   actions.original = await ensureXhsOriginal();
   if (!actions.original.ok) return { ...(await inspectXiaohongshu()), blocker: typedBlocker(actions.original.blockerCode || 'ACTION_FAILED', actions.original.reason, { evidence: actions.original }) };
+  actions.aiSynthesis = await ensureXhsAiDeclaration();
+  if (!actions.aiSynthesis.ok) {
+    const current = await inspectXiaohongshu();
+    return { ...current, actions, blocker: typedBlocker(actions.aiSynthesis.code || current.gates.aiSynthesis?.evidence?.code || 'AI_DECLARATION_UNVERIFIED', actions.aiSynthesis.message || '小红书 AI 声明没有被新鲜读回', { evidence: { ...actions.aiSynthesis.evidence, clickAccepted: false } }) };
+  }
   actions.cover = (await inspectXiaohongshu()).gates.cover.ok ? {ok:true,skipped:true} : await uploadXhsCover();
   if (!actions.cover.ok) return { ...(await inspectXiaohongshu()), blocker: typedBlocker('PLATFORM_REJECTED_ASSET', actions.cover.reason, { retryable: true, evidence: actions.cover }) };
   const receipts = actions.cover.receipt ? { cover: actions.cover.receipt } : {};
@@ -682,7 +766,18 @@ async function mutateXiaohongshu() {
 }
 
 async function runPlatformPhase() {
-  if (phase === 'inspect' || phase === 'verify') return await inspectXiaohongshu();
+  if (phase === 'inspect' || phase === 'verify') {
+    const current = await inspectXiaohongshu();
+    const accountBlock = xhsAccountBlocker(current);
+    if (accountBlock) return { ...current, blocker: accountBlock };
+    if (phase === 'verify') {
+      const failing = ['aiSynthesis', 'collection', 'prose', 'schedule', 'platformDedup']
+        .map(name => current.gates[name])
+        .find(gate => gate && gate.ok === false && gate.evidence?.required !== false && gate.evidence?.code);
+      if (failing) return { ...current, blocker: typedBlocker(failing.evidence.code, failing.evidence.message, { evidence: failing.evidence }) };
+    }
+    return current;
+  }
   if (phase === 'upload_start') return await startXiaohongshuUpload();
   if (phase === 'prefill') return await prefillXiaohongshu();
   if (phase === 'upload') return await uploadXiaohongshu();

@@ -86,6 +86,89 @@ test("space-name cannot cover more than one platform", () => {
   );
 });
 
+test("profile discovery does not require a package", () => {
+  const args = parse(["--operation", "diagnose-binding"]);
+  assert.equal(args.diagnosis, "diagnose-binding");
+  assert.equal(args.packagePath, "");
+  assert.equal(args.inspectOnly, true);
+});
+
+test("maintenance diagnose requires an explicit binding and a separate root", () => {
+  const maintenanceConfig = {
+    purpose: "maintenance-account-observation",
+    schemaVersion: 2,
+    locale: "zh-CN",
+    accounts: {
+      xiaohongshu: {
+        platform: "xiaohongshu",
+        profileId: "Profile 2",
+        profileLabel: "AI",
+        displayName: "Example Creator",
+        accountId: "1000000001",
+        labelLikeProfileId: true,
+      },
+    },
+  };
+  const parseMaintenance = (argv) => parse(argv, { loadConfig: () => maintenanceConfig });
+  assert.throws(() => parseMaintenance(["--operation", "maintenance-diagnose"]), /maintenance-diagnose requires/);
+  assert.throws(() => parse([
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-example",
+    "--maintenance-root", "/tmp/vp-maint-root",
+  ]), /maintenance-account-observation/);
+  const args = parseMaintenance([
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-example",
+    "--maintenance-root", "/tmp/vp-maint-root",
+  ]);
+  assert.equal(args.diagnosis, "maintenance-diagnose");
+  assert.equal(args.packagePath, "");
+  assert.deepEqual(args.platforms, []);
+  assert.equal(args.cleanupStaleSpaces, false);
+  assert.throws(() => parseMaintenance([
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Other Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-example",
+    "--maintenance-root", "/tmp/vp-maint-root",
+  ]), /does not match accounts.xiaohongshu/);
+  assert.throws(() => parseMaintenance([
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-example",
+    "--maintenance-root", "/tmp/v2-jobs",
+  ]), /separate from production job state/);
+  assert.throws(() => parse(["--package", "/tmp/pkg.json", "--operation", "create"], {
+    loadConfig: () => maintenanceConfig,
+  }), /productionReady is false/);
+  const status = parseMaintenance([
+    "--operation", "maintenance-space-status",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-account-check-585fe53-20261108-1201",
+  ]);
+  assert.equal(status.diagnosis, "maintenance-space-status");
+  assert.equal(status.maintenanceRoot, "");
+  assert.throws(() => parseMaintenance([
+    "--operation", "maintenance-space-status",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-account-check-585fe53-20261108-1201",
+    "--close-maintenance-space",
+  ]), /does not accept --close-maintenance-space/);
+});
+
 test("explicit operations guard cover replacement and repost", () => {
   const replace = parse(["--package", "/tmp/pkg.json", "--job-id", "ready-job", "--replace-cover"]);
   assert.equal(replace.operation, "replace-cover");

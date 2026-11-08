@@ -79,6 +79,32 @@ B站关闭双比例同步，分别上传 4:3 与 16:9 文件，完成两槽后�
 
 三个平台独立无操作检查均通过；最终发布守卫保持启用、拦截次数为零，没有点击投稿、发布、保存或定时发布。该结果只接受本轮三平台封面适配，不代表五平台系统级验收。
 
+## 2026-11-07 云端模拟，不是页面验收
+
+本轮只在无 Ego、无浏览器、无账号会话的环境里做了静态检查和模拟回归。没有调用 `profiles()`、`listTaskSpaces()` 或 `taskSpace()`，没有打开创作者页面，也没有上传、建稿或发布。
+
+已用模拟证明：绑定 id 必须来自 `profiles()` 的 `profileId` 字段；标签不会被当成 id；已有空间对不上 profile 时不打开页面、不调用会切换 Profile 的参数；创建才把 `profileId` 写入 `taskSpace`；页面身份要同时读到显示名和账号 ID；定时值能校验 Asia/Shanghai，且 `authorizesFinalPublish` 恒为 false；`定时发布` 仍被最终按钮守卫拦住；任务去重不能通过平台去重门。账号锁跨两个 state root 的既有测试仍然有效。
+
+以下项目没有现场证据，不能写成已验收，也不能写成平台不支持：
+
+- 2026-11-07 mini 只读诊断带回一条 profile：`id` 为字面值 `Profile 2`，`name` 为 `AI`，`isDefault` 为 false。解析器按这个形状读取；空的 `listTaskSpaces()` 只说明该次库存，不能当作恢复已验证。页面身份、声明、合集、去重、封面和定时仍未实页验收。
+- `maintenance-diagnose` 的模拟证明：同名空间、未知列表或 id 不在 `profiles()` 中时不调用 `taskSpace`；脚本只允许历史非发布页 `/new/home` 与 `/new/note-manager`，首页身份不匹配就不进入管理页，不打开 `/publish/publish`，不点击控件，不调用 `releaseForConfirmedPublish`。首页文本匹配也不等于生产 READY。它只接受 `purpose` 为 `maintenance-account-observation` 的外置配置；`validate-maintenance` 在模拟里成功且 `productionReady` 为 false，生产 `validate` 和 create/resume/inspect 拒绝该文件。事实标记写在 `finish` 之前；缺少标记时结果是 `unknown` 而不是 false，截图文件不改写身份。`finish` 未返回时关闭结果保持 `unknown`。公开 lite.ego.app 文档属于另一代接口，没有当作当前契约。585fe53 那一次实页的原始 Ego stdout/stderr 没有落盘。b118 的库存查询返回该维护空间仍在。99ddff1 对 107 的一次 `taskSpace(id)` 句柄匹配后，`finish({ keep: false })` 被已安装的 Ego 0.6.2.7 拒绝：`keep` 必须是 `"all"` 或由不重复、非空页面标签组成的数组。34a306f 对同一 107 使用 `finish({ keep: [] })` 后 SDK 返回了，随后 `listTaskSpaces` 仍有这一条。按 v2.2.0，任务空间会保留；库存仍在不是 finish 失败，也不是页面已关闭的证据。没有调用 `task.pages()`。
+- 小红书页面上的账号名、账号 ID、`笔记含AI合成内容`、合集、正文和定时控件选择器。
+- 笔记管理里的已发/已定时去重。
+- 目标时刻的定时控件读回。现有 3:4 封面路径没有在本轮重新做实页验收。
+
+## 2026-11-08 有限维护验收，不是生产回归
+
+这次只接受维护入口在已安装的 Ego 0.6.2.7 上的有限账号页观察。共享正式版没有切换，PR 没有合并。`ready`、`accepted`、`accountVerified`、`publishable` 都是 false。没有验收媒体、表单、AI 声明功能、合集、封面、定时功能、平台查重或生产发布链路。`pagesClosed` 仍是 `not-observed`，没有调用 `task.pages()`。
+
+12:36（北京时间），独立 release `7e7eccc72a5d3d127893b2a370f02c9ab069dcd5` 用未改写的无媒体维护配置跑了一次 `maintenance-diagnose`。显式 Profile 2、标签 AI、显示名 GrokBot看AI、账号 4221066816，空间名 `vp-maint-7e7eccc-20261108-1236`，并带 `--close-maintenance-space`。publisher 与 Ego 都是退出码 0，runId `af7c34a063fe0040`，自建 spaceId 111，`ownership` 为 `agent`，没有重试。首页 fresh 正文 `nameOk`、`idOk` 为 true，`risk` 为 false，`homeIdentityMatched` 为 true，随后 `noteManagerOpened` 为 true。没有打开发布 URL，没有读媒体，没有放行 final guard，没有写生产 state。截图存在，但不是身份判定依据。没有表单、hover、点击、上传、保存、发布或排期修改。AI 声明、合集、封面是 `not-observed`；定时只是正文里的 `visible-text`，没有验证定时功能。
+
+同一 run 的 Ego 日志先有关闭前 `pending`，随后 `closeResult` 为 `{closed:true, keep:[], reason:finish-returned}`。最终 checkpoint 与该回执一致。这里的 `closed` 只是 `finish` 正常返回。随后只对这个新精确名做了一次 `maintenance-space-status`：publisher 与 Ego 都是退出码 0，`found` 为 false，`ambiguous` 为 false，`spaceId` 为 null，`extraKeys` 与 `listedFields` 为空，`taskSpaceCalled`、`pageOpened`、`finishCalled` 都是 false。这次缺席只说明该名称的这次快照里没有这一行，不代替 finish 回执，也不证明页面已关。
+
+空间 107 的两个时点分开保留：34a306f 的 `finish-returned`，以及 12:35 旧精确名的缺席。12:36 的证据包不含那次旧名查询。没有从这两个时点推断页面关闭，也没有再次 close 或重连 107。
+
+这次没有权限拒绝、`USER_CONTROL`、验证码或登录墙。Ego 日志里有可更新提示，没有执行升级。调用结束后 publisher 锁不存在，没有删锁。Profile 2 的维护互斥交还 redbooker。此后不再做现场调用，也不把这次写成完整生产回归。
+
 ## 平台记录
 
 ### 小红书

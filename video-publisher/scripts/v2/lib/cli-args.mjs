@@ -1,4 +1,11 @@
 import path from "node:path";
+import { MAINTENANCE_CONFIG_PURPOSE, validateMaintenanceConfig } from "../../lib/config.mjs";
+
+function sameFields(left, right) {
+  return left.profileId === right.profileId
+    && left.displayName === right.displayName
+    && left.accountId === right.accountId;
+}
 
 export function uniqueSpaceSuffix() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -19,14 +26,25 @@ const VALUE_FLAGS = new Set([
   "--cleanup-name",
   "--cleanup-prefix",
   "--operation",
+  "--profile-id",
+  "--profile-label",
+  "--display-name",
+  "--account-id",
+  "--maintenance-space-name",
+  "--maintenance-space-id",
+  "--maintenance-root",
 ]);
 
-const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost"]);
+const OPERATIONS = new Set(["auto", "create", "resume", "inspect", "replace-cover", "repost", "diagnose-binding", "diagnose-dedup", "maintenance-diagnose", "maintenance-space-status", "maintenance-close-space"]);
+const MAINTENANCE_CLI_OPERATIONS = new Set(["maintenance-diagnose", "maintenance-space-status", "maintenance-close-space"]);
 
 export function parsePublisherArgs(argv, context) {
   const { loadConfig, PLATFORMS, UsageError, positive, defaultStateRoot } = context;
   const cleanupOnly = argv.includes("--cleanup-only");
-  const config = loadConfig({ requireOnboarded: !cleanupOnly });
+  const operationIndex = argv.indexOf("--operation");
+  const requestedOperation = operationIndex >= 0 ? argv[operationIndex + 1] : "";
+  const skipsOnboarding = requestedOperation === "diagnose-binding" || MAINTENANCE_CLI_OPERATIONS.has(requestedOperation);
+  const config = loadConfig({ requireOnboarded: !cleanupOnly && !skipsOnboarding });
   const options = {
     inspectOnly: false,
     operation: "auto",
@@ -45,6 +63,16 @@ export function parsePublisherArgs(argv, context) {
     spacePrefix: "video publisher v2",
     spaceName: "",
     spaceSuffix: "",
+    diagnosis: "",
+    accountBinding: null,
+    maintenanceProfileId: "",
+    maintenanceProfileLabel: "",
+    maintenanceDisplayName: "",
+    maintenanceAccountId: "",
+    maintenanceSpaceName: "",
+    maintenanceSpaceId: "",
+    maintenanceRoot: "",
+    closeMaintenanceSpace: false,
     cleanupNames: ["oil-collect-publish"],
     cleanupPrefixes: [],
     packagePath: "",
@@ -64,6 +92,7 @@ export function parsePublisherArgs(argv, context) {
     if (arg === "--keep-space" || arg === "--no-close-on-complete") { options.keepSpace = true; continue; }
     if (arg === "--close-on-complete" || arg === "--close-space" || arg === "--no-keep-space") { options.keepSpace = false; continue; }
     if (arg === "--cleanup-only") { options.cleanupOnly = true; continue; }
+    if (arg === "--close-maintenance-space") { options.closeMaintenanceSpace = true; continue; }
     if (arg === "--cleanup-stale-spaces") { options.cleanupStaleSpaces = true; continue; }
     if (arg === "--no-cleanup-stale-spaces") { options.cleanupStaleSpaces = false; continue; }
     if (VALUE_FLAGS.has(arg)) {
@@ -80,6 +109,13 @@ export function parsePublisherArgs(argv, context) {
       else if (arg === "--check-concurrency") options.checkConcurrency = positive(value, arg);
       else if (arg === "--upload-concurrency") options.uploadConcurrency = positive(value, arg);
       else if (arg === "--operation") options.operation = value.trim();
+      else if (arg === "--profile-id") options.maintenanceProfileId = value.trim();
+      else if (arg === "--profile-label") options.maintenanceProfileLabel = value.trim();
+      else if (arg === "--display-name") options.maintenanceDisplayName = value.trim();
+      else if (arg === "--account-id") options.maintenanceAccountId = value.trim();
+      else if (arg === "--maintenance-space-name") options.maintenanceSpaceName = value.trim();
+      else if (arg === "--maintenance-space-id") options.maintenanceSpaceId = value.trim();
+      else if (arg === "--maintenance-root") options.maintenanceRoot = path.resolve(value);
       else if (arg === "--platform" || arg === "--platforms") {
         platforms.push(...value.split(",").map(item => item.trim()).filter(Boolean));
       } else if (arg === "--cleanup-name") {
@@ -98,16 +134,21 @@ export function parsePublisherArgs(argv, context) {
   if (!options.packagePath && positional.length && cleanupOnly && positional[0].endsWith(".json")) {
     options.packagePath = path.resolve(positional.shift());
   }
-  if (!options.packagePath && !cleanupOnly) {
+  const maintenanceStatus = options.operation === "maintenance-space-status";
+  const maintenanceClose = options.operation === "maintenance-close-space";
+  const maintenance = MAINTENANCE_CLI_OPERATIONS.has(options.operation);
+  if (!options.packagePath && !cleanupOnly && options.operation !== "diagnose-binding" && !maintenance) {
     throw new UsageError("Usage: run-safe-platforms.sh <package.json> [task-suffix] [platform...] [--package|--platform|--task-suffix|--job-id|--fresh-space|--reuse-space|--close-on-complete|--cleanup-only]");
   }
   if (!options.taskSuffix && positional.length && !PLATFORMS.includes(positional[0])) {
     options.taskSuffix = positional.shift();
   }
   if (!options.taskSuffix) options.taskSuffix = "manual";
-  const selected = [...new Set(platforms.length ? platforms : positional.length ? positional : (cleanupOnly ? [] : config.defaultPlatforms))];
+  const selected = maintenance
+    ? []
+    : [...new Set(platforms.length ? platforms : positional.length ? positional : (cleanupOnly ? [] : config.defaultPlatforms))];
   if (selected.some(platform => !PLATFORMS.includes(platform))) throw new UsageError("Unsupported platform argument");
-  if (!cleanupOnly) {
+  if (!cleanupOnly && options.operation !== "diagnose-binding" && !maintenance) {
     const unavailablePlatforms = selected.filter(platform => !(config.availablePlatforms || []).includes(platform));
     if (unavailablePlatforms.length) {
       throw new UsageError(`Platform is not configured as available: ${unavailablePlatforms.join(", ")}. Update Video Publisher onboarding before browser work.`);
@@ -123,6 +164,62 @@ export function parsePublisherArgs(argv, context) {
     throw new UsageError(`--operation must be one of: ${[...OPERATIONS].join(", ")}`);
   }
   if (options.operation === "inspect") options.inspectOnly = true;
+  if (options.operation === "diagnose-binding" || options.operation === "diagnose-dedup") {
+    options.inspectOnly = true;
+    options.freshSpace = false;
+    options.diagnosis = options.operation;
+  }
+  const normalizedBinding = config.accounts?.xiaohongshu || null;
+  if (normalizedBinding) options.accountBinding = normalizedBinding;
+  if (config.purpose === MAINTENANCE_CONFIG_PURPOSE && !maintenance) {
+    throw new UsageError("This config purpose is maintenance-account-observation and productionReady is false. Refusing create, resume, inspect, diagnose-binding, cleanup, and every other production command.");
+  }
+  if (maintenance) {
+    options.diagnosis = maintenanceClose ? "maintenance-close-space" : maintenanceStatus ? "maintenance-space-status" : "maintenance-diagnose";
+    options.inspectOnly = true;
+    options.freshSpace = false;
+    options.cleanupStaleSpaces = false;
+    if ((maintenanceStatus || maintenanceClose) && options.closeMaintenanceSpace) {
+      throw new UsageError(`${options.operation} does not accept --close-maintenance-space.`);
+    }
+    if (config.purpose !== MAINTENANCE_CONFIG_PURPOSE) {
+      throw new UsageError("maintenance commands require purpose maintenance-account-observation. Create it with: node scripts/config.mjs init-maintenance-account. A production config is refused before Ego.");
+    }
+    const maintenanceErrors = validateMaintenanceConfig({ ...config, unknownKeys: [] });
+    if (maintenanceErrors.length) {
+      throw new UsageError(`maintenance config is not ready: ${maintenanceErrors.join("; ")}`);
+    }
+    const missing = [];
+    if (!options.maintenanceProfileId) missing.push("--profile-id");
+    if (!options.maintenanceDisplayName) missing.push("--display-name");
+    if (!options.maintenanceAccountId) missing.push("--account-id");
+    if (!options.maintenanceSpaceName) missing.push("--maintenance-space-name");
+    if (maintenanceClose && !options.maintenanceSpaceId) missing.push("--maintenance-space-id");
+    if (!maintenanceStatus && !options.maintenanceRoot) missing.push("--maintenance-root");
+    if (missing.length) throw new UsageError(`${options.operation} requires ${missing.join(", ")}`);
+    if (maintenanceClose && !/^[1-9]\d{0,11}$/.test(options.maintenanceSpaceId)) {
+      throw new UsageError("--maintenance-space-id must be the decimal id returned by maintenance-space-status");
+    }
+    if (maintenanceClose && !/^vp-maint-[A-Za-z0-9][A-Za-z0-9._-]{2,80}$/.test(options.maintenanceSpaceName)) {
+      throw new UsageError("maintenance-close-space only accepts one exact vp-maint- name");
+    }
+    if (!maintenanceStatus && (options.maintenanceRoot === defaultStateRoot || (options.stateRoot && options.maintenanceRoot === options.stateRoot))) {
+      throw new UsageError("--maintenance-root must be separate from production job state");
+    }
+    const requested = {
+      profileId: options.maintenanceProfileId,
+      displayName: options.maintenanceDisplayName,
+      accountId: options.maintenanceAccountId,
+      profileLabel: options.maintenanceProfileLabel,
+    };
+    if (!options.accountBinding || !sameFields(options.accountBinding, requested)) {
+      throw new UsageError("CLI account binding does not match accounts.xiaohongshu. Refusing to retarget.");
+    }
+    if (options.maintenanceProfileLabel && options.accountBinding.profileLabel !== options.maintenanceProfileLabel) {
+      throw new UsageError("CLI --profile-label does not match accounts.xiaohongshu.profileLabel. Refusing to retarget.");
+    }
+    options.accountBinding = { ...options.accountBinding };
+  }
   if (options.operation === "replace-cover" && !options.jobId) {
     throw new UsageError("--operation replace-cover requires --job-id for the existing READY draft");
   }

@@ -13,11 +13,21 @@ const PLATFORM_HOSTS = {
   wechat_channels: /channels\.weixin\.qq\.com/,
   youtube: /studio\.youtube\.com|accounts\.google\.com/,
 };
-const FINAL_TEXT = /^(发布|发布笔记|发表|立即投稿)$/;
+const FINAL_TEXT = /^(发布|发布笔记|发表|立即投稿|定时发布)$/;
 const YOUTUBE_FINAL_TEXT = /^(保存|发布|安排时间|Save|Publish|Schedule)$/i;
 const FINAL_GUARD_KEY = '__VIDEO_PUBLISHER_FINAL_GUARD__';
 let activeTaskSpace = null;
 let taskSpaceRecovery = null;
+let taskSpaceBinding = null;
+const IDENTITY_BIND_CODES = new Set([
+  "ACCOUNT_MISMATCH",
+  "ACCOUNT_UNVERIFIED",
+  "ACCOUNT_AMBIGUOUS",
+  "ACCOUNT_BINDING_INVALID",
+  "PROFILE_NOT_LISTED",
+  "PROFILE_LIST_UNVERIFIED",
+  "SPACE_PROFILE_UNVERIFIED",
+]);
 
 const compactText = value => String(value || '').replace(/\s+/g, ' ').trim();
 const unique = values => [...new Set((values || []).filter(Boolean))];
@@ -40,7 +50,60 @@ function failedGate(evidence = {}, extra = {}) {
   return { ok: false, evidence, ...extra };
 }
 
+async function selectBoundTaskSpace() {
+  const profilesPayload = await profiles();
+  const spacesPayload = await listTaskSpaces();
+  const plan = planTaskSpace({
+    binding: accountBinding,
+    taskName,
+    taskSpaceRef: String(taskSpaceRef || ""),
+    profilesPayload,
+    spacesPayload,
+  });
+  if (!plan.ok) {
+    const error = new Error(plan.message);
+    error.code = plan.code;
+    error.evidence = plan.evidence || null;
+    throw error;
+  }
+  activeTaskSpace = plan.passProfileId
+    ? await taskSpace(plan.nameOrId, { profileId: plan.profileId })
+    : await taskSpace(plan.nameOrId);
+  taskSpaceBinding = {
+    action: plan.action,
+    profileProof: plan.profileProof,
+    requestedProfileId: plan.profileId,
+    profileIdPassed: plan.passProfileId === true,
+    livePageAcceptance: "pending",
+  };
+  if (taskName && activeTaskSpace?.name && activeTaskSpace.name !== taskName) {
+    const error = new Error("恢复到的空间名称与任务记录不一致。未按名称另建空间，也未切换 Profile。");
+    error.code = "SPACE_PROFILE_UNVERIFIED";
+    error.evidence = { actualName: activeTaskSpace.name, expectedName: taskName, livePageAcceptance: "pending" };
+    throw error;
+  }
+  const listedAgain = extractSpaceRecords(await listTaskSpaces());
+  const created = listedAgain.records.find(record => (
+    (activeTaskSpace?.name && record.name === activeTaskSpace.name)
+    || (activeTaskSpace?.id != null && String(record.id) === String(activeTaskSpace.id))
+  ));
+  if (created?.profileFieldPresent && created.profileId !== accountBinding.profileId) {
+    const error = new Error("空间回读的 profileId 与绑定不一致。未打开页面，也未切换默认 Profile。");
+    error.code = "ACCOUNT_MISMATCH";
+    error.evidence = { actualProfileId: created.profileId, expectedProfileId: accountBinding.profileId };
+    throw error;
+  }
+  if (created?.profileFieldPresent && created.profileId === accountBinding.profileId) {
+    taskSpaceBinding.profileProof = plan.action === "create" ? "listed-after-create" : "listed-space-profileId";
+  }
+  return activeTaskSpace;
+}
+
 async function selectTaskSpace() {
+  if (typeof accountBinding !== "undefined" && accountBinding) {
+    await selectBoundTaskSpace();
+    return activeTaskSpace;
+  }
   const raw = String(taskSpaceRef || '').trim();
   const ref = raw && /^\d+$/.test(raw) ? Number(raw) : (raw || taskName);
   try {
@@ -158,7 +221,21 @@ function checkpointReceipts(receipts) {
 }
 
 async function preparePlatform() {
-  const task = await selectTaskSpace();
+  let task;
+  try {
+    task = await selectTaskSpace();
+  } catch (error) {
+    if (IDENTITY_BIND_CODES.has(error?.code)) {
+      return {
+        task: null,
+        selected: {
+          ok: false,
+          blocker: typedBlocker(error.code, error.message, { evidence: error.evidence || null, requiresUser: error.code === "ACCOUNT_MISMATCH" || error.code === "ACCOUNT_AMBIGUOUS" }),
+        },
+      };
+    }
+    throw error;
+  }
   const selected = await selectPlatformTab();
   if (!selected.ok) return { task, selected };
   const guard = await armFinalPublishGuard();
@@ -257,6 +334,7 @@ async function emitObservation(observation) {
     taskSpaceId: activeTaskSpace?.id ?? null,
     taskSpace: activeTaskSpace?.name || taskName,
     taskSpaceRecovery,
+    spaceBinding: taskSpaceBinding,
     observedAt: new Date().toISOString(),
     finalPublishClicked: false,
     ...observation,

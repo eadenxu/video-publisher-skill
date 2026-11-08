@@ -54,6 +54,16 @@ The current editor exposes a hover-only `.cover-edit-entry`. Pointer movement ca
 
 Accept the cover only when the main editor exposes the uploaded preview URL, normally on `ros-preview.xhscdn.com`, and no cover dialog blocks the page. Store that URL in the receipt and require the verify phase to find it again.
 
+## Account, declarations, collection, and schedule
+
+When `accounts.xiaohongshu` is set, space creation uses `taskSpace(name, { profileId })` with the id from `profiles()`. Resume does not pass `profileId`, because that option cannot move an existing space. The page must freshly show the configured display name and account id outside the editor. This readback is covered by simulated tests only. It is not live-page acceptance.
+
+`xhsAiSynthesis: true` asks for the visible label `笔记含AI合成内容`. The adapter may use one unambiguous nearby switch, then must read that switch again. The click result is not success. If the control is missing or not unique, the gate stays `AI_DECLARATION_UNVERIFIED` and nothing is clicked. The same fail-closed readback applies to `xhsCollection` and to an optional `xhsProse`: prose is never cleared in order to pretend it was written.
+
+`xhsSchedule` stores an Asia/Shanghai instant and compares it with a visible control value. The adapter does not click `定时发布`. Absence of a proven control is `SCHEDULE_CONTROL_UNVERIFIED`; that is not a finding that Xiaohongshu cannot schedule. `xhsPlatformDedup` cannot be satisfied by this job's upload history. The read-only diagnose operation does not open note management. Selectors for these new controls are not claimed as live-tested.
+
+The existing 3:4 cover path is unchanged: success still requires the visible crop control, the selected file, and the accepted CDN image. A cover click is not a cover receipt.
+
 ## Required Gates
 
 ```text
@@ -63,6 +73,9 @@ video fully uploaded
 exact title
 exact topic entities with no plain residue
 原创声明 enabled
+AI synthesis, collection, prose, and schedule read back when the package requests them
+platform history dedup read back when the package requests it; job dedup does not count
+account identity when a binding is configured
 custom 3:4 receipt when enabled, otherwise default cover state
 no blocking dialog
 one visible enabled final control labeled `发布` or `发布笔记`

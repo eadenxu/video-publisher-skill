@@ -25,6 +25,16 @@ if (process.env.VIDEO_PUBLISHER_V2_MOCK_EXISTING_READY === "1" && phase === "ins
 }
 gates.authenticated = { ok: true, evidence: {} };
 gates.draftIdentity = { ok: true, evidence: {} };
+for (const name of ["accountIdentity", "aiSynthesis", "collection", "prose", "schedule", "platformDedup"]) {
+  if (!gates[name]) continue;
+  gates[name] = { ok: true, evidence: { required: false } };
+}
+if (process.env.VIDEO_PUBLISHER_V2_MOCK_ACCOUNT === "mismatch" && gates.accountIdentity) {
+  gates.accountIdentity = {
+    ok: false,
+    evidence: { required: true, code: "ACCOUNT_MISMATCH", message: "mock account mismatch" },
+  };
+}
 gates.noBlockingDialog = { ok: true, evidence: {} };
 gates.finalButton = { ok: true, evidence: { text: "final", disabled: false } };
 gates.safety = { ok: true, evidence: { finalPublishClicked: false, guardArmed: true, blockedAttempts: 0 } };

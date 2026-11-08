@@ -19,6 +19,7 @@ import { acquireJobLock, assertJobLockOwner, registerJobLockMember, resolvePubli
 import { PLATFORMS, requiredGates } from "./lib/model.mjs";
 import { acquirePlatformLock } from "./lib/platform-lock.mjs";
 import { parseV2Result, V2_RESULT_PREFIX } from "./lib/result-line.mjs";
+import { normalizeXhsRequirements } from "./lib/xhs-fields.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const validators = {
@@ -108,6 +109,8 @@ const media = inspectMediaFile(pkg.videoPath);
 const errors = [...validators[platform](pkg), ...validateMediaForPlatform(pkg, platform, media)];
 if (errors.length) throw new Error(`Package preflight failed for ${platform}: ${errors.join("; ")}`);
 
+const accountBinding = platform === "xiaohongshu" ? (config.accounts?.xiaohongshu || null) : null;
+const xhsRequirements = platform === "xiaohongshu" ? normalizeXhsRequirements(pkg) : null;
 const header = [
   'import fs from "node:fs";',
   'import path from "node:path";',
@@ -122,12 +125,19 @@ const header = [
   `const expectedVideoReceipt = ${JSON.stringify(JSON.parse(process.env.VIDEO_PUBLISHER_V2_VIDEO_RECEIPT || "null"))};`,
   `const receiptCheckpointPath = ${JSON.stringify(process.env.VIDEO_PUBLISHER_V2_CHECKPOINT_PATH || "")};`,
   `const jobFingerprint = ${JSON.stringify(process.env.VIDEO_PUBLISHER_V2_FINGERPRINT || "")};`,
+  `const accountBinding = ${JSON.stringify(accountBinding)};`,
+  `const xhsRequirements = ${JSON.stringify(xhsRequirements)};`,
 ].join("\n");
+function egoFragment(relativePath) {
+  return fs.readFileSync(path.join(DIR, relativePath), "utf8").replace(/^export /gm, "");
+}
 const fragments = [
   header,
-  fs.readFileSync(path.join(DIR, "ego", "core.mjs"), "utf8"),
-  fs.readFileSync(path.join(DIR, "platforms", platformFiles[platform]), "utf8"),
-  fs.readFileSync(path.join(DIR, "platforms", "dispatch.mjs"), "utf8"),
+  egoFragment("lib/account-binding.mjs"),
+  egoFragment("lib/xhs-fields.mjs"),
+  egoFragment("ego/core.mjs"),
+  egoFragment(`platforms/${platformFiles[platform]}`),
+  egoFragment("platforms/dispatch.mjs"),
 ].join("\n\n");
 
 const publisherLockDirectory = resolvePublisherLockDirectory();

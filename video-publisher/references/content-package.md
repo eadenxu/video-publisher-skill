@@ -47,6 +47,7 @@ oil 默认只写标题和 tags。不要为小红书、抖音、B 站或视频号
 ```text
 xhsTitle | xiaohongshuTitle：可选标题覆盖
 xhsTopics：至少一个真实话题标签，不得包含半角点 `.`
+originalityBasis、xhsAiSynthesis、xhsCollection、xhsProse、xhsSchedule、xhsPlatformDedup：可选；请求后必须新鲜读回。定时值不授权点击最终发布。
 ```
 
 标题加权长度不得超过 20：所有 ASCII 字符（英文字母、数字、空格和半角标点）算 0.5，其他 Unicode code point 算 1。加权长度未超限时保留原始标题。

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import { loadConfig } from "./config.mjs";
+import { normalizeXhsRequirements, validateXhsRequirements } from "../v2/lib/xhs-fields.mjs";
 
 export function stripHash(tag) {
   return String(tag || "").trim().replace(/^#+\s*/, "").trim();
@@ -303,6 +304,7 @@ export function validateXiaohongshuPackage(pkg) {
   if (dottedTopics.length) {
     errors.push(`xiaohongshu topics do not support "."; use a dot-free label instead: ${dottedTopics.join(", ")}`);
   }
+  errors.push(...validateXhsRequirements(pkg.xhsRequirements || normalizeXhsRequirements(pkg)));
   return errors;
 }
 

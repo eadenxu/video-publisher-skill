@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "purpose": "maintenance-account-observation",
+  "locale": "zh-CN",
+  "accounts": {
+    "xiaohongshu": {
+      "platform": "xiaohongshu",
+      "profileId": "PASTE_PROFILE_ID_FROM_PROFILES",
+      "profileLabel": "PASTE_DISPLAY_LABEL_NOT_THE_ID",
+      "displayName": "PASTE_ACCOUNT_DISPLAY_NAME",
+      "accountId": "PASTE_ACCOUNT_ID",
+      "labelLikeProfileId": false
+    }
+  }
+}
