@@ -1,14 +1,18 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   CONFIG_PLATFORMS,
+  MAINTENANCE_CONFIG_PURPOSE,
   ORIGINALITY_POLICIES,
   configStatus,
   createOnboardedConfig,
   loadConfig,
+  maintenanceAccountFile,
   resolveConfigPath,
   writeConfig,
+  writeMaintenanceConfig,
 } from "./lib/config.mjs";
 
 function print(value) {
@@ -23,6 +27,8 @@ function usage() {
     "  node scripts/config.mjs onboard --source-dir <path> [options]",
     "  node scripts/config.mjs add-platform <platform> [--default] [platform options]",
     "  node scripts/config.mjs bind-account xiaohongshu --profile-id <profiles()-id> --display-name <name> --account-id <id> [--profile-label <label>]",
+    "  node scripts/config.mjs init-maintenance-account --profile-id <profiles()-id> --display-name <name> --account-id <id> [--profile-label <label>]",
+    "  node scripts/config.mjs validate-maintenance",
     "",
     "Repeatable options:",
     "  --available-platform <xiaohongshu|douyin|bilibili|wechat_channels|youtube>",
@@ -69,6 +75,17 @@ function parseOptions(argv) {
   return result;
 }
 
+function resolveConfigPathWithoutOverride() {
+  const saved = process.env.VIDEO_PUBLISHER_CONFIG;
+  delete process.env.VIDEO_PUBLISHER_CONFIG;
+  try {
+    return resolveConfigPath();
+  } finally {
+    if (saved === undefined) delete process.env.VIDEO_PUBLISHER_CONFIG;
+    else process.env.VIDEO_PUBLISHER_CONFIG = saved;
+  }
+}
+
 function positive(value, fallback, name) {
   if (value === undefined) return fallback;
   const parsed = Number(value);
@@ -85,7 +102,36 @@ try {
   } else if (command === "validate") {
     const status = configStatus(configPath);
     print(status);
-    if (status.onboardingRequired || status.warnings.length) process.exitCode = 1;
+    if (status.productionReady !== true) process.exitCode = 1;
+  } else if (command === "validate-maintenance") {
+    const status = configStatus(configPath);
+    print(status);
+    if (status.maintenanceReady !== true || status.productionReady !== false) process.exitCode = 1;
+  } else if (command === "init-maintenance-account") {
+    if (!process.env.VIDEO_PUBLISHER_CONFIG) {
+      throw new Error("init-maintenance-account requires VIDEO_PUBLISHER_CONFIG to point at a new file. It does not write the production config path.");
+    }
+    const productionPath = resolveConfigPathWithoutOverride();
+    if (path.resolve(configPath) === productionPath) {
+      throw new Error(`refusing to write ${MAINTENANCE_CONFIG_PURPOSE} over the production config path: ${productionPath}`);
+    }
+    const options = parseOptions(argv);
+    const allowed = new Set(["--profile-id", "--profile-label", "--display-name", "--account-id"]);
+    const disallowed = Object.keys(options).filter(flag => !allowed.has(flag));
+    if (disallowed.length) throw new Error(`unsupported init-maintenance-account option: ${disallowed.join(", ")}`);
+    const resolved = path.resolve(configPath);
+    const skillRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+    const relativeToSkill = path.relative(skillRoot, resolved);
+    if (relativeToSkill === "" || (!relativeToSkill.startsWith("..") && !path.isAbsolute(relativeToSkill))) {
+      throw new Error("maintenance config must be written outside the skill directory");
+    }
+    writeMaintenanceConfig(maintenanceAccountFile({
+      profileId: options["--profile-id"],
+      profileLabel: options["--profile-label"] || "",
+      displayName: options["--display-name"],
+      accountId: options["--account-id"],
+    }), configPath);
+    print(configStatus(configPath));
   } else if (command === "add-platform") {
     const [platform, ...optionArgs] = argv;
     if (!CONFIG_PLATFORMS.includes(platform)) throw new Error(`unsupported available platform: ${platform || "(missing)"}`);

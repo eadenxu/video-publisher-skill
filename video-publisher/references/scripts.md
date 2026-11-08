@@ -118,21 +118,31 @@ node scripts/v2/publisher.mjs --operation diagnose-binding
 
 `scripts/run-safe-platforms.sh --operation diagnose-binding` is the same entry. Do not pass a placeholder package. `--package`, `--job-id`, and `--state-root` are ignored and not written. The command only calls `profiles()` and `listTaskSpaces()`. It does not create, open, switch, or close a space, and it does not open a page or upload. It does receive and print the whole profile list and the whole space list, and it holds the publisher lock while that runs. Copy the returned `profileId`, not the label, into the private config.
 
-`maintenance-diagnose` is not a pure read. It creates one new Ego space named `vp-maint-...` when that exact name is absent, navigates that space only to `https://creator.xiaohongshu.com/new/home` and, after the fresh home text matches the display name and account id, to `https://creator.xiaohongshu.com/new/note-manager`. It writes a record and optional screenshots under `--maintenance-root` and holds the account-wide publisher lock. It does not open the video publish URL, click, hover, upload, fill a form, claim an existing space, write a production job, or call `releaseForConfirmedPublish`. A name conflict, unknown list shape, or missing profile id stops before `taskSpace`. A home mismatch, login wall, or captcha stops before note-manager and does not create a second space. Controls that are not visible as text are `not-observed`, which is not production acceptance. `ready`, `accepted`, `accountVerified`, and `publishable` stay false. Exit 0 means the new space was created and the home identity text matched, not that a draft is publishable. Public `lite.ego.app` pages describe `useOrCreateTaskSpace` and are a different generation; this command follows the saved 0.6.2.7 `taskSpace` / `newPage` / `goto` / `evaluate` model instead. Navigation is not a claim of zero server-side writes. Use a new config and maintenance root; do not reuse an older deployment's config or state directory.
+`maintenance-diagnose` is not a pure read. It creates one new Ego space named `vp-maint-...` when that exact name is absent, navigates that space only to `https://creator.xiaohongshu.com/new/home` and, after the fresh home text matches the display name and account id, to `https://creator.xiaohongshu.com/new/note-manager`. It writes a record and screenshots under `--maintenance-root` and holds the account-wide publisher lock. It does not open the video publish URL, click, hover, upload, fill a form, claim an existing space, write a production job, or call `releaseForConfirmedPublish`. A name conflict, unknown list shape, or missing profile id stops before `taskSpace`. A home mismatch, login wall, or captcha stops before note-manager and does not create a second space. Controls that are not visible as text are `not-observed`, which is not production acceptance. `ready`, `accepted`, `accountVerified`, and `publishable` stay false. Exit 0 means the new space was created and the home identity text matched, not that a draft is publishable. Public `lite.ego.app` pages describe `useOrCreateTaskSpace` and are a different generation; this command follows the saved 0.6.2.7 `taskSpace` / `newPage` / `goto` / `evaluate` model instead. Navigation is not a claim of zero server-side writes.
+
+The command accepts only a config whose `purpose` is `maintenance-account-observation`. That file has exactly `schemaVersion`, `purpose`, `locale`, and `accounts.xiaohongshu`. It has no `sourceDirectory`, `onboarding`, `declarations`, or platform lists. `node scripts/config.mjs validate-maintenance` must exit 0 with `maintenanceReady: true` and `productionReady: false` before the diagnose command. `node scripts/config.mjs validate` on the same file exits 1. Create, resume, inspect, and the other production commands refuse this file before reading a package or media. A production config is refused by `maintenance-diagnose` before Ego. Write it with `init-maintenance-account` to a new `VIDEO_PUBLISHER_CONFIG` path outside the skill and outside the production config. The shape without a real account is `examples/maintenance-config.example.json`. For profile id `Profile 2`, the stored `labelLikeProfileId` is `true`; the CLI sets that. Do not hand-edit it to `false`.
+
+`validate-maintenance` does not create the maintenance state directory, take the publisher lock, or call Ego. The diagnose command creates `--maintenance-root` only after that check passes. Screenshots are automatic. There is no screenshot flag. After home opens, the file is `<maintenance-root>/<maintenance-space-name>-home.png`. After the home identity matches and note-manager opens, the file is `<maintenance-root>/<maintenance-space-name>-notes.png`. The record is `<maintenance-root>/<maintenance-space-name>.json`. A screenshot error is stored as `screenshotError` and does not click the page. `--close-maintenance-space` is a boolean flag and takes no value. The three CLI identity fields must match `accounts.xiaohongshu`. A mismatch exits before Ego.
 
 ```bash
+export VIDEO_PUBLISHER_CONFIG="$HOME/.config/video-publisher-maintenance/config.json"
+node scripts/config.mjs init-maintenance-account \
+  --profile-id "PROFILE_ID_FROM_PROFILES" \
+  --profile-label "PROFILE_LABEL_NOT_THE_ID" \
+  --display-name "ACCOUNT_DISPLAY_NAME" \
+  --account-id "ACCOUNT_ID"
+node scripts/config.mjs validate-maintenance
 node scripts/v2/publisher.mjs \
   --operation maintenance-diagnose \
   --profile-id "PROFILE_ID_FROM_PROFILES" \
+  --profile-label "PROFILE_LABEL_NOT_THE_ID" \
   --display-name "ACCOUNT_DISPLAY_NAME" \
   --account-id "ACCOUNT_ID" \
   --maintenance-space-name "vp-maint-account-check" \
-  --maintenance-root "/absolute/video-publisher-maintenance"
+  --maintenance-root "$HOME/.local/state/video-publisher-maintenance"
 ```
 
-Example config shape, with no real account data: `examples/maintenance-config.example.json`. Create that file outside the skill directory and point `VIDEO_PUBLISHER_CONFIG` at it. If it already contains `accounts.xiaohongshu`, the three command fields must match.
-
-`--close-maintenance-space` finishes only the handle created in that same process, and only when its name matches. It does not scan or close other spaces. Omit it to keep the new space. Do not point `--maintenance-root` at the production job directory. If `accounts.xiaohongshu` is already set, these three binding fields must match it.
+`--close-maintenance-space` finishes only the handle created in that same process, and only when its name matches. It does not scan or close other spaces. Omit it to keep the new space. Do not point `--maintenance-root` at the production job directory. The CLI identity must match the maintenance file; this command does not fill a missing account from the shell.
 
 ```bash
 node scripts/config.mjs bind-account xiaohongshu \

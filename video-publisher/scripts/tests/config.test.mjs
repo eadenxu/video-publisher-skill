@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 import {
   configStatus,
   createOnboardedConfig,
+  maintenanceAccountFile,
+  validateMaintenanceConfig,
   writeConfig,
+  writeMaintenanceConfig,
 } from "../lib/config.mjs";
 
 const SCRIPT_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "config.mjs");
@@ -57,6 +60,9 @@ test("completed onboarding writes a valid private per-user configuration", async
   writeConfig(config, configPath);
   const ready = configStatus(configPath);
   assert.equal(ready.onboardingRequired, false);
+  assert.equal(ready.purpose, "production");
+  assert.equal(ready.productionReady, true);
+  assert.equal(ready.maintenanceReady, false);
   assert.deepEqual(ready.config.availablePlatforms, ["xiaohongshu", "douyin", "bilibili"]);
   assert.deepEqual(ready.config.defaultPlatforms, ["douyin", "bilibili"]);
   assert.deepEqual(ready.config.platforms.douyin.defaultTopics, ["Tutorial"]);
@@ -196,5 +202,100 @@ test("YouTube can be added non-destructively with private publishing defaults", 
     defaultVisibility: "private",
   });
   assert.deepEqual(updated.contentProfile, { copyStyle: "Personal style", recurringTags: ["AI"] });
+  await fs.promises.rm(root, { recursive: true, force: true });
+});
+
+test("maintenance account config validates without media or production onboarding", async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "video-publisher-maintenance-config-"));
+  const configPath = path.join(root, "maintenance", "config.json");
+  const examplePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "examples", "maintenance-config.example.json");
+  const example = JSON.parse(await fs.promises.readFile(examplePath, "utf8"));
+  assert.equal(example.purpose, "maintenance-account-observation");
+  assert.equal(Object.hasOwn(example, "sourceDirectory"), false);
+  assert.equal(Object.hasOwn(example, "onboarding"), false);
+  assert.equal(Object.hasOwn(example, "declarations"), false);
+  const exampleStatus = configStatus(examplePath);
+  assert.equal(exampleStatus.maintenanceReady, true);
+  assert.equal(exampleStatus.productionReady, false);
+  const created = await run(process.execPath, [
+    SCRIPT_PATH,
+    "init-maintenance-account",
+    "--profile-id", "Profile 2",
+    "--profile-label", "AI",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+  ], { env: { ...process.env, VIDEO_PUBLISHER_CONFIG: configPath } });
+  assert.equal(created.code, 0, `${created.stderr}\n${created.stdout}`);
+  const status = JSON.parse(created.stdout);
+  assert.equal(status.maintenanceReady, true);
+  assert.equal(status.productionReady, false);
+  assert.equal(status.onboardingRequired, true);
+  assert.deepEqual(status.errors, []);
+  const stored = JSON.parse(await fs.promises.readFile(configPath, "utf8"));
+  assert.deepEqual(Object.keys(stored).sort(), ["accounts", "locale", "purpose", "schemaVersion"]);
+  assert.equal(stored.accounts.xiaohongshu.labelLikeProfileId, true);
+  assert.equal(stored.accounts.xiaohongshu.profileId, "Profile 2");
+  const checked = await run(process.execPath, [SCRIPT_PATH, "validate-maintenance"], {
+    env: { ...process.env, VIDEO_PUBLISHER_CONFIG: configPath },
+  });
+  assert.equal(checked.code, 0, checked.stdout);
+  const production = await run(process.execPath, [SCRIPT_PATH, "validate"], {
+    env: { ...process.env, VIDEO_PUBLISHER_CONFIG: configPath },
+  });
+  assert.equal(production.code, 1);
+  assert.equal(JSON.parse(production.stdout).productionReady, false);
+  const again = await run(process.execPath, [
+    SCRIPT_PATH,
+    "init-maintenance-account",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+  ], { env: { ...process.env, VIDEO_PUBLISHER_CONFIG: configPath } });
+  assert.equal(again.code, 1);
+  assert.match(again.stdout, /refusing to overwrite/);
+  const missing = path.join(root, "missing", "config.json");
+  const noIdentity = await run(process.execPath, [
+    SCRIPT_PATH,
+    "init-maintenance-account",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+  ], { env: { ...process.env, VIDEO_PUBLISHER_CONFIG: missing } });
+  assert.equal(noIdentity.code, 1);
+  assert.equal(fs.existsSync(missing), false);
+  const withMedia = await run(process.execPath, [
+    SCRIPT_PATH,
+    "init-maintenance-account",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--source-dir", root,
+  ], { env: { ...process.env, VIDEO_PUBLISHER_CONFIG: path.join(root, "other.json") } });
+  assert.equal(withMedia.code, 1);
+  assert.equal(fs.existsSync(path.join(root, "other.json")), false);
+  const unset = await run(process.execPath, [
+    SCRIPT_PATH,
+    "init-maintenance-account",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+  ], { env: { ...process.env, VIDEO_PUBLISHER_CONFIG: "" } });
+  assert.equal(unset.code, 1);
+  assert.match(unset.stdout, /VIDEO_PUBLISHER_CONFIG/);
+  await fs.promises.writeFile(path.join(root, "bad.json"), `${JSON.stringify({
+    ...maintenanceAccountFile({ profileId: "Profile 2", displayName: "Example Creator", accountId: "1000000001" }),
+    sourceDirectory: "/absolute/path/to/videos",
+    onboarding: { completed: true },
+    declarations: { originalityPolicy: "ask_each_run" },
+  }, null, 2)}\n`);
+  const bad = configStatus(path.join(root, "bad.json"));
+  assert.equal(bad.maintenanceReady, false);
+  assert.equal(bad.productionReady, false);
+  assert.match(bad.errors.join("\n"), /sourceDirectory/);
+  assert.throws(() => writeConfig(maintenanceAccountFile({
+    profileId: "Profile 2",
+    displayName: "Example Creator",
+    accountId: "1000000001",
+  }), path.join(root, "laundered.json")), /refuses a maintenance-account-observation config/);
+  assert.equal(validateMaintenanceConfig(configStatus(configPath).config).length, 0);
   await fs.promises.rm(root, { recursive: true, force: true });
 });

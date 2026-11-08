@@ -8,6 +8,7 @@ if [[ $# -lt 1 ]]; then
   echo "   or: $0 --package <package.json> [--platform name]... [--task-suffix name] [--job-id id]" >&2
   echo "   or: $0 --operation diagnose-binding" >&2
   echo "   or: $0 --operation maintenance-diagnose --profile-id ID --display-name NAME --account-id ID --maintenance-space-name vp-maint-NAME --maintenance-root DIR" >&2
+  echo "      maintenance-diagnose requires VIDEO_PUBLISHER_CONFIG from: node scripts/config.mjs init-maintenance-account && node scripts/config.mjs validate-maintenance" >&2
   echo "   or: $0 --cleanup-only [--state-root DIR] [--package file] [--job-id id]" >&2
   echo "Options: --operation auto|create|resume|inspect|replace-cover|repost|diagnose-binding|diagnose-dedup|maintenance-diagnose --replace-cover --confirm-new-copy" >&2
   echo "         --inspect-only --confirm-original-rights --fresh-space --reuse-space --force-fresh-space" >&2

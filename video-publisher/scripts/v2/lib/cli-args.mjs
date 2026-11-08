@@ -1,4 +1,5 @@
 import path from "node:path";
+import { MAINTENANCE_CONFIG_PURPOSE, validateMaintenanceConfig } from "../../lib/config.mjs";
 
 function sameFields(left, right) {
   return left.profileId === right.profileId
@@ -164,11 +165,21 @@ export function parsePublisherArgs(argv, context) {
   }
   const normalizedBinding = config.accounts?.xiaohongshu || null;
   if (normalizedBinding) options.accountBinding = normalizedBinding;
+  if (config.purpose === MAINTENANCE_CONFIG_PURPOSE && !maintenance) {
+    throw new UsageError("This config purpose is maintenance-account-observation and productionReady is false. Refusing create, resume, inspect, diagnose-binding, cleanup, and every other production command.");
+  }
   if (maintenance) {
     options.diagnosis = "maintenance-diagnose";
     options.inspectOnly = true;
     options.freshSpace = false;
     options.cleanupStaleSpaces = false;
+    if (config.purpose !== MAINTENANCE_CONFIG_PURPOSE) {
+      throw new UsageError("maintenance-diagnose requires purpose maintenance-account-observation. Create it with: node scripts/config.mjs init-maintenance-account. A production config is refused before Ego.");
+    }
+    const maintenanceErrors = validateMaintenanceConfig({ ...config, unknownKeys: [] });
+    if (maintenanceErrors.length) {
+      throw new UsageError(`maintenance config is not ready: ${maintenanceErrors.join("; ")}`);
+    }
     const missing = [];
     if (!options.maintenanceProfileId) missing.push("--profile-id");
     if (!options.maintenanceDisplayName) missing.push("--display-name");
@@ -185,10 +196,13 @@ export function parsePublisherArgs(argv, context) {
       accountId: options.maintenanceAccountId,
       profileLabel: options.maintenanceProfileLabel,
     };
-    if (options.accountBinding && !sameFields(options.accountBinding, requested)) {
+    if (!options.accountBinding || !sameFields(options.accountBinding, requested)) {
       throw new UsageError("CLI account binding does not match accounts.xiaohongshu. Refusing to retarget.");
     }
-    options.accountBinding = { ...(options.accountBinding || {}), ...requested };
+    if (options.maintenanceProfileLabel && options.accountBinding.profileLabel !== options.maintenanceProfileLabel) {
+      throw new UsageError("CLI --profile-label does not match accounts.xiaohongshu.profileLabel. Refusing to retarget.");
+    }
+    options.accountBinding = { ...options.accountBinding };
   }
   if (options.operation === "replace-cover" && !options.jobId) {
     throw new UsageError("--operation replace-cover requires --job-id for the existing READY draft");

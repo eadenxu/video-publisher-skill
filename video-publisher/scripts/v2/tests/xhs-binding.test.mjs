@@ -32,7 +32,7 @@ import {
   parseScheduleInput,
   scheduleAuthorizesFinalPublish,
 } from "../lib/xhs-fields.mjs";
-import { createOnboardedConfig, writeConfig } from "../../lib/config.mjs";
+import { createOnboardedConfig, maintenanceAccountFile, writeConfig, writeMaintenanceConfig } from "../../lib/config.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const V2_DIR = path.dirname(DIR);
@@ -735,11 +735,11 @@ test("maintenance diagnose writes only its own root and does not open the publis
   const scriptPath = path.join(root, "script.mjs");
   const fakeEgoPath = path.join(root, "fake-ego.mjs");
   const marker = path.join(root, "upload-marker");
-  writeConfig(createOnboardedConfig({
-    sourceDirectory: root,
-    availablePlatforms: ["xiaohongshu"],
-    defaultPlatforms: ["xiaohongshu"],
-    accounts: { xiaohongshu: { profileId: "Profile 2", profileLabel: "AI", displayName: "Example Creator", accountId: "1000000001" } },
+  writeMaintenanceConfig(maintenanceAccountFile({
+    profileId: "Profile 2",
+    profileLabel: "AI",
+    displayName: "Example Creator",
+    accountId: "1000000001",
   }), configPath);
   await fs.promises.writeFile(fakeEgoPath, `
     import fs from "node:fs";
@@ -816,10 +816,11 @@ test("maintenance diagnose uses the account lock across separate maintenance roo
   const configPath = path.join(root, "config.json");
   const fakeEgoPath = path.join(root, "fake-ego.mjs");
   const lockRoot = path.join(root, "locks");
-  writeConfig(createOnboardedConfig({
-    sourceDirectory: root,
-    availablePlatforms: ["xiaohongshu"],
-    defaultPlatforms: ["xiaohongshu"],
+  writeMaintenanceConfig(maintenanceAccountFile({
+    profileId: "Profile 2",
+    profileLabel: "AI",
+    displayName: "Example Creator",
+    accountId: "1000000001",
   }), configPath);
   await fs.promises.writeFile(fakeEgoPath, `
     import fs from "node:fs";
@@ -855,5 +856,68 @@ test("maintenance diagnose uses the account lock across separate maintenance roo
   assert.notEqual(second.code, 0);
   assert.match(`${second.stderr}\n${second.stdout}`, /already running/);
   assert.equal(fs.existsSync(path.join(lockRoot, "publisher", "orchestrator.lock")), false);
+  await fs.promises.rm(root, { recursive: true, force: true });
+});
+
+test("maintenance diagnose rejects a production config and an identity mismatch before Ego", async () => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "video-publisher-maintenance-refuse-"));
+  const productionPath = path.join(root, "production.json");
+  const maintenancePath = path.join(root, "maintenance.json");
+  const maintenanceRoot = path.join(root, "state");
+  const marker = path.join(root, "ego-started");
+  const fakeEgoPath = path.join(root, "fake-ego.mjs");
+  writeConfig(createOnboardedConfig({
+    sourceDirectory: root,
+    availablePlatforms: ["xiaohongshu"],
+    defaultPlatforms: ["xiaohongshu"],
+    accounts: { xiaohongshu: { profileId: "Profile 2", profileLabel: "AI", displayName: "Example Creator", accountId: "1000000001" } },
+  }), productionPath);
+  writeMaintenanceConfig(maintenanceAccountFile({
+    profileId: "Profile 2",
+    profileLabel: "AI",
+    displayName: "Example Creator",
+    accountId: "1000000001",
+  }), maintenancePath);
+  await fs.promises.writeFile(fakeEgoPath, `
+    import fs from "node:fs";
+    fs.writeFileSync(process.env.VIDEO_PUBLISHER_TEST_MARKER, "started");
+  `);
+  const args = [
+    path.join(V2_DIR, "publisher.mjs"),
+    "--operation", "maintenance-diagnose",
+    "--profile-id", "Profile 2",
+    "--display-name", "Example Creator",
+    "--account-id", "1000000001",
+    "--maintenance-space-name", "vp-maint-example",
+    "--maintenance-root", maintenanceRoot,
+  ];
+  const env = {
+    ...process.env,
+    VIDEO_PUBLISHER_V2_EGO_COMMAND: fakeEgoPath,
+    VIDEO_PUBLISHER_TEST_MARKER: marker,
+    VIDEO_PUBLISHER_V2_LOCK_ROOT: path.join(root, "locks"),
+  };
+  const production = await run(process.execPath, args, { env: { ...env, VIDEO_PUBLISHER_CONFIG: productionPath } });
+  assert.notEqual(production.code, 0);
+  assert.match(`${production.stderr}\n${production.stdout}`, /maintenance-account-observation/);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.existsSync(maintenanceRoot), false);
+  const mismatch = await run(process.execPath, args.map((item, index) => (
+    index === args.indexOf("--display-name") + 1 ? "Other Creator" : item
+  )), { env: { ...env, VIDEO_PUBLISHER_CONFIG: maintenancePath } });
+  assert.notEqual(mismatch.code, 0);
+  assert.match(`${mismatch.stderr}\n${mismatch.stdout}`, /does not match accounts.xiaohongshu/);
+  assert.equal(fs.existsSync(marker), false);
+  assert.equal(fs.existsSync(maintenanceRoot), false);
+  const create = await run(process.execPath, [
+    path.join(V2_DIR, "publisher.mjs"),
+    "--operation", "create",
+    "--package", path.join(root, "missing-package.json"),
+    "--platform", "xiaohongshu",
+  ], { env: { ...env, VIDEO_PUBLISHER_CONFIG: maintenancePath } });
+  assert.notEqual(create.code, 0);
+  assert.match(`${create.stderr}\n${create.stdout}`, /productionReady is false/);
+  assert.doesNotMatch(`${create.stderr}\n${create.stdout}`, /video file not found|Package JSON not found|sourceDirectory/);
+  assert.equal(fs.existsSync(marker), false);
   await fs.promises.rm(root, { recursive: true, force: true });
 });
