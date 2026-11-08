@@ -15,6 +15,8 @@ import {
   explainDiscoveryConfig,
   assertMaintenanceScript,
   buildMaintenanceDiagnoseScript,
+  evaluateHomeIdentity,
+  summarizeManagerText,
   extractProfileRecords,
   extractSpaceRecords,
   normalizeAccountBinding,
@@ -712,10 +714,20 @@ test("maintenance planning never creates when the name exists or the profile lis
   });
   assertMaintenanceScript(script);
   assert.equal((script.match(/await taskSpace\(/g) || []).length, 1);
-  assert.doesNotMatch(script, /useOrCreateTaskSpace|openOrReuseTab|creator\.xiaohongshu\.com|releaseForConfirmedPublish|uploadFile|cliLog\s*\(/);
+  assert.match(script, /https:\/\/creator\.xiaohongshu\.com\/new\/home/);
+  assert.match(script, /https:\/\/creator\.xiaohongshu\.com\/new\/note-manager/);
+  assert.doesNotMatch(script, /useOrCreateTaskSpace|openOrReuseTab|\/publish\/publish|releaseForConfirmedPublish|uploadFile|mouse\.move|cliLog\s*\(/);
+  const home = evaluateHomeIdentity("小红书账号：1000000001 GrokBot看AI", { displayName: "GrokBot看AI", accountId: "1000000001" });
+  assert.equal(home.noteManagerAllowed, true);
+  const mismatch = evaluateHomeIdentity("小红书账号：2000000002 别人", { displayName: "GrokBot看AI", accountId: "1000000001" });
+  assert.equal(mismatch.noteManagerAllowed, false);
+  const risk = evaluateHomeIdentity("GrokBot看AI 小红书账号：1000000001 请登录", { displayName: "GrokBot看AI", accountId: "1000000001" });
+  assert.equal(risk.noteManagerAllowed, false);
+  assert.equal(summarizeManagerText("只有标题").aiDeclaration, "not-observed");
+  assert.equal(summarizeManagerText("笔记含AI合成内容").aiDeclaration, "visible-text");
 });
 
-test("maintenance diagnose writes only its own root and does not navigate or upload", async () => {
+test("maintenance diagnose writes only its own root and does not open the publish page", async () => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "video-publisher-maintenance-"));
   const maintenanceRoot = path.join(root, "maintenance");
   const stateRoot = path.join(root, "jobs");
@@ -734,18 +746,20 @@ test("maintenance diagnose writes only its own root and does not navigate or upl
     let script = "";
     for await (const chunk of process.stdin) script += chunk;
     fs.writeFileSync(process.env.VIDEO_PUBLISHER_TEST_SCRIPT, script);
-    if (/uploadFile|openOrReuseTab|releaseForConfirmedPublish|creator\\.xiaohongshu\\.com/.test(script)) {
+    if (/uploadFile|openOrReuseTab|releaseForConfirmedPublish|\\/publish\\/publish|mouse\\.move/.test(script)) {
       fs.writeFileSync(process.env.VIDEO_PUBLISHER_TEST_MARKER, "mutation");
     }
     console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({
       created: true,
-      navigated: false,
+      homeOpened: true,
+      homeIdentityMatched: true,
+      noteManagerOpened: true,
       publishUrlOpened: false,
       mediaRead: false,
       finalGuardReleaseCalled: false,
-      controlsObserved: false,
-      taskSpaceCalled: true,
       retried: false,
+      taskSpaceCalled: true,
+      controls: { aiDeclaration: "not-observed", collection: "not-observed", cover: "not-observed", schedule: "not-observed" },
       spaceName: "vp-maint-example",
       spaceId: "synthetic-maint-1",
       closeResult: { closed: false, reason: "kept" }
@@ -779,17 +793,21 @@ test("maintenance diagnose writes only its own root and does not navigate or upl
   assert.equal(summary.accepted, false);
   assert.equal(summary.accountVerified, false);
   assert.equal(summary.publishable, false);
-  assert.equal(summary.navigated, false);
+  assert.equal(summary.homeIdentityMatched, true);
+  assert.equal(summary.noteManagerOpened, true);
   assert.equal(summary.publishUrlOpened, false);
+  assert.equal(summary.controls.aiDeclaration, "not-observed");
   assert.equal(summary.mediaRead, false);
   assert.equal(summary.finalGuardReleaseCalled, false);
   assert.equal(summary.productionStateWritten, false);
   const script = await fs.promises.readFile(scriptPath, "utf8");
   assert.equal((script.match(/await taskSpace\(/g) || []).length, 1);
-  assert.doesNotMatch(script, /useOrCreateTaskSpace|openOrReuseTab|releaseForConfirmedPublish|uploadFile/);
+  assert.match(script, /https:\/\/creator\.xiaohongshu\.com\/new\/home/);
+  assert.doesNotMatch(script, /useOrCreateTaskSpace|openOrReuseTab|releaseForConfirmedPublish|uploadFile|\/publish\/publish/);
   const record = JSON.parse(await fs.promises.readFile(path.join(maintenanceRoot, "vp-maint-example.json"), "utf8"));
   assert.equal(record.publishable, false);
-  assert.equal(record.navigated, false);
+  assert.equal(record.homeIdentityMatched, true);
+  assert.equal(record.publishUrlOpened, false);
   await fs.promises.rm(root, { recursive: true, force: true });
 });
 
@@ -808,7 +826,7 @@ test("maintenance diagnose uses the account lock across separate maintenance roo
     for await (const chunk of process.stdin) {}
     fs.writeFileSync(process.env.VIDEO_PUBLISHER_TEST_READY, "ready");
     await new Promise(resolve => setTimeout(resolve, 1500));
-    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ created: true, navigated: false, publishUrlOpened: false, mediaRead: false, finalGuardReleaseCalled: false, spaceId: "synthetic", spaceName: process.env.SPACE_NAME }));
+    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ created: true, homeIdentityMatched: true, publishUrlOpened: false, finalGuardReleaseCalled: false, retried: false, spaceId: "synthetic", spaceName: process.env.SPACE_NAME }));
   `);
   const env = {
     ...process.env,

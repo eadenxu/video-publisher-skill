@@ -321,6 +321,7 @@ function maintenanceLibrarySource() {
 }
 
 async function runMaintenanceDiagnose(args) {
+  fs.mkdirSync(args.maintenanceRoot, { recursive: true, mode: 0o700 });
   const input = {
     binding: {
       profileId: args.accountBinding.profileId,
@@ -330,6 +331,10 @@ async function runMaintenanceDiagnose(args) {
     },
     spaceName: args.maintenanceSpaceName,
     closeAfter: args.closeMaintenanceSpace === true,
+    screenshots: {
+      home: path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}-home.png`),
+      noteManager: path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}-notes.png`),
+    },
   };
   const runner = buildMaintenanceDiagnoseScript(input);
   assertMaintenanceScript(runner);
@@ -353,32 +358,37 @@ async function runMaintenanceDiagnose(args) {
     kind: "maintenance-diagnose",
     pureReadOnly: false,
     createsOwnSpace: payload.created === true,
+    navigatesAllowlistedAccountPages: payload.homeOpened === true,
     ready: false,
     accepted: false,
     accountVerified: false,
     publishable: false,
-    navigated: false,
-    publishUrlOpened: false,
+    homeIdentityMatched: payload.homeIdentityMatched === true,
+    noteManagerOpened: payload.noteManagerOpened === true,
+    publishUrlOpened: payload.publishUrlOpened === true,
     mediaRead: false,
-    finalGuardReleaseCalled: false,
-    controlsObserved: false,
+    finalGuardReleaseCalled: payload.finalGuardReleaseCalled === true,
+    controls: payload.controls || null,
     productionStateWritten: false,
     helpPrerequisites: [
-      "Saved Ego guide v2.2.0 documents taskSpace as reuse-or-create, not as a side-effect-free read of an existing space.",
-      "That guide does not document a non-draft Xiaohongshu account URL, nor the allowed ownership values.",
-      "Public lite.ego.app pages use useOrCreateTaskSpace and were not used as this operation's contract.",
-      "Account and control readback stays unverified until a version-matched help shows a page read that does not create a platform draft.",
+      "Saved guide v2.2.0 documents taskSpace as reuse-or-create. This command creates one new named space; it does not read an existing space id.",
+      "Home and note-manager URLs come from one historical 0.6.2.7 run, not from a guarantee that navigation has zero server-side writes.",
+      "ownership values are not enumerated in that guide.",
+      "Public lite.ego.app pages use useOrCreateTaskSpace and are not this command's contract.",
+      "Controls not visible as text stay not-observed. That is not production acceptance.",
     ],
     observed: payload,
     error: parsed.ok ? "" : parsed.error,
   };
-  fs.mkdirSync(args.maintenanceRoot, { recursive: true, mode: 0o700 });
   const recordPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.json`);
   fs.writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
   console.log(JSON.stringify({ ...record, maintenanceRecord: recordPath }, null, 2));
-  if (payload.created !== true || payload.navigated === true || payload.publishUrlOpened === true || payload.finalGuardReleaseCalled === true) {
-    process.exitCode = 10;
-  }
+  const safeStop = payload.created === true
+    && payload.homeIdentityMatched === true
+    && payload.publishUrlOpened !== true
+    && payload.finalGuardReleaseCalled !== true
+    && payload.retried !== true;
+  if (!safeStop) process.exitCode = 10;
 }
 
 async function main() {

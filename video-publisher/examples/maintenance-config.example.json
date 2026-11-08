@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 2,
+  "onboarding": {
+    "completed": true,
+    "completedAt": "2026-11-08T00:00:00.000Z",
+    "updatedAt": "2026-11-08T00:00:00.000Z"
+  },
+  "locale": "zh-CN",
+  "sourceDirectory": "/absolute/path/to/videos",
+  "availablePlatforms": ["xiaohongshu"],
+  "defaultPlatforms": ["xiaohongshu"],
+  "contentProfile": {
+    "copyStyle": "clear, conversational, specific, non-hype",
+    "recurringTags": []
+  },
+  "declarations": {
+    "originalityPolicy": "ask_each_run"
+  },
+  "platforms": {
+    "douyin": { "defaultTopics": [] },
+    "bilibili": { "allowedAutoTags": [] },
+    "youtube": {
+      "defaultCategory": "",
+      "defaultLanguage": "",
+      "defaultVisibility": "private"
+    }
+  },
+  "execution": {
+    "checkConcurrency": 1,
+    "uploadConcurrency": 1
+  },
+  "cover": {
+    "uploadExistingByDefault": false
+  },
+  "accounts": {
+    "xiaohongshu": {
+      "platform": "xiaohongshu",
+      "profileId": "PASTE_PROFILE_ID_FROM_PROFILES",
+      "profileLabel": "PASTE_DISPLAY_LABEL_NOT_THE_ID",
+      "displayName": "PASTE_ACCOUNT_DISPLAY_NAME",
+      "accountId": "PASTE_ACCOUNT_ID",
+      "labelLikeProfileId": false
+    }
+  }
+}

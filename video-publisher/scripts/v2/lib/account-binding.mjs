@@ -444,7 +444,7 @@ export function planMaintenanceSpace({ binding, spaceName, profilesPayload, spac
       create: false,
       code: "PROFILE_NOT_LISTED",
       message: "配置的 profileId 不在 profiles() 的 id 列表中。显示 name 不会代替 id。未创建空间。",
-      evidence: { configuredProfileId: binding.profileId, listedProfileIds: profiles.records.map(record => record.profileId) },
+      evidence: { configuredProfileId: binding.profileId, listedCount: profiles.records.length, targetListed: false },
     };
   }
   const spaces = extractSpaceRecords(spacesPayload);
@@ -476,6 +476,33 @@ export function planMaintenanceSpace({ binding, spaceName, profilesPayload, spac
   };
 }
 
+export const MAINTENANCE_PAGES = Object.freeze({
+  home: "https://creator.xiaohongshu.com/new/home",
+  noteManager: "https://creator.xiaohongshu.com/new/note-manager",
+});
+
+export function evaluateHomeIdentity(text, binding) {
+  const body = String(text || "");
+  const risk = /验证码|安全验证|扫码登录|请登录/.test(body);
+  const nameOk = Boolean(binding?.displayName) && body.includes(binding.displayName);
+  const accountId = String(binding?.accountId || "");
+  const idOk = Boolean(accountId) && new RegExp(`(?:^|\\D)${accountId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\D|$)`).test(body);
+  const ok = nameOk && idOk && !risk;
+  return { ok, nameOk, idOk, risk, noteManagerAllowed: ok };
+}
+
+export function summarizeManagerText(text) {
+  const body = String(text || "");
+  const seen = (pattern) => pattern.test(body);
+  return {
+    aiDeclaration: seen(/笔记含AI合成内容/) ? "visible-text" : "not-observed",
+    collection: seen(/合集/) ? "visible-text" : "not-observed",
+    cover: seen(/封面/) ? "visible-text" : "not-observed",
+    schedule: seen(/定时/) ? "visible-text" : "not-observed",
+    meaning: "visible text only; not clicked; not-observed is not a claim that the platform lacks the control",
+  };
+}
+
 export function assertMaintenanceScript(script) {
   const forbidden = [
     /useOrCreateTaskSpace/,
@@ -485,22 +512,29 @@ export function assertMaintenanceScript(script) {
     /cliLog\s*\(/,
     /releaseForConfirmedPublish/,
     /uploadFile/,
-    /creator\.xiaohongshu\.com/,
+    /\/publish\/publish/,
     /gotoAndWait/,
     /newTab\s*\(/,
     /switchTab\s*\(/,
     /listTabs\s*\(/,
-    /newPage\s*\(/,
-    /userPage\s*\(/,
-    /\.tabs\s*\(/,
-    /\.pages\s*\(/,
+    /mouse\.move/,
+    /xiaohongshu\.com\/explore/,
     /\bclick\s*\(/,
   ];
   const hit = forbidden.find(pattern => pattern.test(script));
   if (hit) throw new Error(`maintenance script contains a forbidden call: ${hit}`);
   const creates = script.match(/await taskSpace\(/g) || [];
   if (creates.length !== 1) throw new Error("maintenance script must call taskSpace exactly once");
-  if (!script.includes("navigated: false")) throw new Error("maintenance script must record that it did not navigate");
+  if (!script.includes(MAINTENANCE_PAGES.home) || !script.includes(MAINTENANCE_PAGES.noteManager)) {
+    throw new Error("maintenance script must name only the allowlisted account pages");
+  }
+  if (!script.includes("publishUrlOpened: false")) throw new Error("maintenance script must record that the publish URL stayed closed");
+  const homeGoto = script.indexOf("readAllowlisted(page, pages.home");
+  const gateAt = script.indexOf("identity.noteManagerAllowed");
+  const managerGoto = script.indexOf("readAllowlisted(page, pages.noteManager");
+  if (!(homeGoto >= 0 && gateAt > homeGoto && managerGoto > gateAt)) {
+    throw new Error("note-manager navigation must follow the home identity gate");
+  }
 }
 
 export function buildMaintenanceDiagnoseScript(input) {
@@ -514,17 +548,32 @@ const plan = planMaintenanceSpace({
   profilesPayload,
   spacesPayload,
 });
+const pages = ${JSON.stringify(MAINTENANCE_PAGES)};
+async function readAllowlisted(page, url, screenshotPath) {
+  if (url !== pages.home && url !== pages.noteManager) throw new Error("url not allowlisted");
+  await page.goto(url);
+  if (typeof page.waitForTimeout === "function") await page.waitForTimeout(6000);
+  const text = await page.evaluate(() => String((document.body && document.body.innerText) || "").slice(0, 2000));
+  let screenshotError = "";
+  if (screenshotPath && typeof page.screenshot === "function") {
+    try { await page.screenshot({ path: screenshotPath }); }
+    catch (error) { screenshotError = String(error && error.message || error); }
+  }
+  return { url, text, screenshotError };
+}
 const base = {
   plan,
-  navigated: false,
   publishUrlOpened: false,
   mediaRead: false,
   retried: false,
   finalGuardReleaseCalled: false,
-  controlsObserved: false,
+  ready: false,
+  accepted: false,
+  publishable: false,
+  accountVerified: false,
 };
 if (!plan.create) {
-  console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ ...base, taskSpaceCalled: false, created: false }));
+  console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ ...base, taskSpaceCalled: false, created: false, homeOpened: false, noteManagerOpened: false }));
 } else {
   let handle = null;
   let callError = "";
@@ -534,16 +583,33 @@ if (!plan.create) {
     callError = String(error && error.message || error);
   }
   if (!handle) {
-    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ ...base, taskSpaceCalled: true, created: false, callError }));
+    console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({ ...base, taskSpaceCalled: true, created: false, homeOpened: false, noteManagerOpened: false, callError }));
   } else {
     const spaceName = handle.name == null ? "" : String(handle.name);
     const spaceId = handle.spaceId != null ? handle.spaceId : (handle.id != null ? handle.id : null);
     const ownership = handle.ownership == null ? null : String(handle.ownership);
     const nameMatches = spaceName === plan.spaceName;
+    const ownHandle = nameMatches && ownership !== "user" && spaceId != null;
+    let home = null;
+    let identity = { ok: false, noteManagerAllowed: false };
+    let notes = null;
+    let pageError = "";
+    if (!ownHandle) {
+      pageError = "refusing to open pages on a handle that is not the new maintenance space";
+    } else {
+      try {
+        const page = await handle.newPage();
+        home = await readAllowlisted(page, pages.home, input.screenshots && input.screenshots.home);
+        identity = evaluateHomeIdentity(home.text, input.binding);
+        if (identity.noteManagerAllowed) {
+          notes = await readAllowlisted(page, pages.noteManager, input.screenshots && input.screenshots.noteManager);
+        }
+      } catch (error) {
+        pageError = String(error && error.message || error);
+      }
+    }
     let closeResult = { closed: false, reason: input.closeAfter ? "not-closed" : "kept" };
-    if (!nameMatches || ownership === "user" || spaceId == null) {
-      closeResult = { closed: false, reason: "refusing to finish a handle that is not the new maintenance space" };
-    } else if (input.closeAfter === true) {
+    if (ownHandle && input.closeAfter === true && !pageError) {
       if (typeof handle.finish !== "function") closeResult = { closed: false, reason: "finish-not-on-handle" };
       else {
         await handle.finish({ keep: false });
@@ -553,10 +619,16 @@ if (!plan.create) {
     console.log("VIDEO_PUBLISHER_MAINTENANCE:" + JSON.stringify({
       ...base,
       taskSpaceCalled: true,
-      created: nameMatches && ownership !== "user" && spaceId != null,
+      created: ownHandle,
       spaceName,
       spaceId,
       ownership,
+      homeOpened: Boolean(home),
+      homeIdentityMatched: identity.ok === true,
+      noteManagerOpened: Boolean(notes),
+      home: identity,
+      controls: notes ? summarizeManagerText(notes.text) : null,
+      pageError,
       closeResult,
       callError,
     }));
