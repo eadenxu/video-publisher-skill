@@ -210,6 +210,28 @@ test("public close CLI finishes only the matched own handle and records inventor
   assert.equal(userBody.closeResult.closed, false);
   assert.deepEqual(JSON.parse(fs.readFileSync(callsPath, "utf8")).filter(call => call[0] === "finish"), []);
 
+  const persisted = await closeOnce("persisted", {
+    STUB_SPACES: present,
+    STUB_SPACES_AFTER: JSON.stringify([OTHER, { ...OWN, finished: true, pages: ["p1"] }]),
+  });
+  assert.equal(persisted.code, 0, `${persisted.stderr}\n${persisted.stdout}`);
+  const persistedBody = JSON.parse(persisted.stdout);
+  assert.equal(persistedBody.finishAccepted, true);
+  assert.equal(persistedBody.closeResult.closed, true);
+  assert.equal(persistedBody.inventoryCleared, false);
+  assert.equal(persistedBody.inventoryAfter.code, "STILL_PRESENT");
+  assert.equal(persistedBody.spaceRecordPersists, true);
+  assert.equal(persistedBody.pagesClosed, "not-observed");
+  assert.equal(persistedBody.publishable, false);
+  assert.equal(persistedBody.inventoryAfter.listedFields.finished, true);
+  assert.deepEqual(persistedBody.inventoryAfter.listedFields.pages, ["p1"]);
+  const changed = await closeOnce("changed-row", {
+    STUB_SPACES: present,
+    STUB_SPACES_AFTER: JSON.stringify([{ ...OWN, ownership: "user" }]),
+  });
+  assert.equal(changed.code, 10);
+  assert.equal(JSON.parse(changed.stdout).closeResult.closed, true);
+  assert.equal(JSON.parse(changed.stdout).spaceRecordPersists, "unknown");
   const mismatch = await run(process.execPath, [
     ...args.map((item, index) => index === args.indexOf("--display-name") + 1 ? "Other Creator" : item),
     "--maintenance-root", path.join(root, "mismatch"),

@@ -546,6 +546,19 @@ async function runMaintenanceClose(args) {
     : inventoryAfter.checked === true
       ? false
       : "unknown";
+  const samePersistedSpace = inventoryAfter.code === "STILL_PRESENT"
+    && inventoryAfter.matchCount === 1
+    && String(inventoryAfter.spaceId) === String(args.maintenanceSpaceId)
+    && inventoryAfter.spaceName === args.maintenanceSpaceName
+    && inventoryAfter.ownership === "agent"
+    && inventoryAfter.profileId === args.accountBinding.profileId;
+  const finishAccepted = payload.handleMatched === true
+    && closeResult.closed === true
+    && closeResult.reason === "finish-returned"
+    && Array.isArray(payload.closeResult?.keep)
+    && payload.closeResult.keep.length === 0
+    && payload.retried === false
+    && payload.pageOpened === false;
   const record = {
     schemaVersion: 1,
     operation: "maintenance-close-space",
@@ -576,6 +589,9 @@ async function runMaintenanceClose(args) {
     closeResult,
     inventoryAfter,
     inventoryCleared,
+    spaceRecordPersists: samePersistedSpace ? true : inventoryCleared === true ? false : "unknown",
+    pagesClosed: "not-observed",
+    finishAccepted,
     substituteCreated: payload.substituteCreated || (payload.taskSpaceCalled === true ? "not-observed" : false),
     productionStateWritten: false,
     egoOutput: {
@@ -589,6 +605,8 @@ async function runMaintenanceClose(args) {
       "taskSpace(id) is reuse-or-create. This command calls it only after one fresh inventory row matches the expected id, exact vp-maint name, profile id, and ownership agent.",
       "A gap remains between that list and the call. The call can resume the space or, if the id disappeared, create or attach something else. A mismatched handle is not finished and is not retried.",
       "This is not a pure read and does not guarantee that the call created nothing.",
+      "Guide v2.2.0 says task spaces persist after the script. finish({ keep: [] }) does not delete the listTaskSpaces row. STILL_PRESENT with the same id, name, agent ownership, and profile is the observed persistence, not a failed finish.",
+      "pagesClosed stays not-observed. This command does not call task.pages(). A remaining inventory row does not show whether pages are open.",
       "closeResult is the finish receipt. inventoryCleared is a later listTaskSpaces snapshot. One does not prove the other.",
       "claimTaskSpace is not used. No page is opened.",
       "Installed Ego 0.6.2.7 rejects finish keep:false. keep must be \"all\" or an array of unique non-empty page labels. This close passes keep:[] so no page label is retained.",
@@ -598,8 +616,7 @@ async function runMaintenanceClose(args) {
   const recordPath = path.join(args.maintenanceRoot, `${args.maintenanceSpaceName}.close.json`);
   fs.writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
   console.log(JSON.stringify({ ...record, maintenanceRecord: recordPath }, null, 2));
-  const closed = closeResult.closed === true && closeResult.reason === "finish-returned";
-  if (!(payload.handleMatched === true && closed && inventoryCleared === true && payload.retried === false && payload.pageOpened === false)) {
+  if (!(finishAccepted && (inventoryCleared === true || samePersistedSpace))) {
     process.exitCode = 10;
   }
 }
@@ -644,6 +661,9 @@ async function runMaintenanceSpaceStatus(args) {
     ownershipKnown: parsed.ok ? payload.ownershipKnown === true : false,
     targetProfileListed: parsed.ok ? payload.targetProfileListed === true : "unknown",
     profileIdMatches: parsed.ok ? payload.profileIdMatches : null,
+    extraKeys: parsed.ok && Array.isArray(payload.extraKeys) ? payload.extraKeys : [],
+    listedFields: parsed.ok && payload.listedFields && typeof payload.listedFields === "object" ? payload.listedFields : {},
+    pagesClosed: "not-observed",
     inventoryAccessed: ["profiles", "listTaskSpaces"],
     otherSpacesHidden: true,
     otherProfilesHidden: true,

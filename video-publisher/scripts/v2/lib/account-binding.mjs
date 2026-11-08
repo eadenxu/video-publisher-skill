@@ -126,6 +126,14 @@ export function extractSpaceRecords(payload) {
     const id = node.spaceId != null ? node.spaceId : node.id;
     if (!name && id == null) return;
     const profileFieldPresent = Object.prototype.hasOwnProperty.call(node, "profileId");
+    const reserved = new Set(["id", "spaceId", "name", "profileId", "ownership"]);
+    const extraKeys = Object.keys(node).filter(key => !reserved.has(key)).sort();
+    const listedFields = {};
+    for (const key of extraKeys) {
+      const value = node[key];
+      if (typeof value === "boolean" || typeof value === "number" || (typeof value === "string" && value.length <= 80)) listedFields[key] = value;
+      else if (Array.isArray(value) && value.length <= 20 && value.every(item => typeof item === "string" && item.length > 0 && item.length <= 80)) listedFields[key] = value;
+    }
     records.push({
       id: id == null ? null : id,
       name,
@@ -133,6 +141,8 @@ export function extractSpaceRecords(payload) {
       profileFieldPresent,
       ownership: Object.prototype.hasOwnProperty.call(node, "ownership") && node.ownership != null ? String(node.ownership) : null,
       ownershipKnown: Object.prototype.hasOwnProperty.call(node, "ownership") && node.ownership != null,
+      extraKeys,
+      listedFields,
     });
   });
   const unique = [];
@@ -537,8 +547,19 @@ export function maintenanceCloseInventory(spacesPayload, { spaceName, spaceId })
   if (spaces.shape === "unrecognized") return { checked: true, code: "SPACE_LIST_UNVERIFIED" };
   const wantedId = String(spaceId);
   const matches = spaces.records.filter(record => record.name === spaceName || String(record.id) === wantedId);
-  if (matches.length === 0) return { checked: true, code: "SPACE_ABSENT" };
-  return { checked: true, code: "STILL_PRESENT", matchCount: matches.length };
+  if (matches.length === 0) return { checked: true, code: "SPACE_ABSENT", matchCount: 0 };
+  const match = matches.length === 1 ? matches[0] : null;
+  return {
+    checked: true,
+    code: "STILL_PRESENT",
+    matchCount: matches.length,
+    spaceId: match ? match.id : null,
+    spaceName: match ? match.name : "",
+    ownership: match ? match.ownership : null,
+    profileId: match ? match.profileId : null,
+    extraKeys: match ? match.extraKeys : [],
+    listedFields: match ? match.listedFields : {},
+  };
 }
 
 export function assertMaintenanceScript(script) {
@@ -832,12 +853,22 @@ const visitSpace = (node, depth) => {
   if (typeof node.id === "string" && typeof node.name === "string" && typeof node.isDefault === "boolean") return;
   if (node.name != null && String(node.name) === targetName) {
     const spaceId = node.spaceId != null ? node.spaceId : (node.id != null ? node.id : null);
+    const reserved = ["id", "spaceId", "name", "profileId", "ownership"];
+    const extraKeys = Object.keys(node).filter(key => !reserved.includes(key)).sort();
+    const listedFields = {};
+    for (const key of extraKeys) {
+      const value = node[key];
+      if (typeof value === "boolean" || typeof value === "number" || (typeof value === "string" && value.length <= 80)) listedFields[key] = value;
+      else if (Array.isArray(value) && value.length <= 20 && value.every(item => typeof item === "string" && item.length > 0 && item.length <= 80)) listedFields[key] = value;
+    }
     matches.push({
       spaceId,
       ownership: Object.prototype.hasOwnProperty.call(node, "ownership") && node.ownership != null ? String(node.ownership) : null,
       ownershipKnown: Object.prototype.hasOwnProperty.call(node, "ownership"),
       profileId: Object.prototype.hasOwnProperty.call(node, "profileId") && node.profileId != null ? String(node.profileId) : null,
       profileKnown: Object.prototype.hasOwnProperty.call(node, "profileId"),
+      extraKeys,
+      listedFields,
     });
   }
   for (const value of Object.values(node)) {
@@ -872,7 +903,10 @@ console.log("VIDEO_PUBLISHER_MAINTENANCE_STATUS:" + JSON.stringify({
   ownership: one && one.ownershipKnown ? one.ownership : null,
   ownershipKnown: Boolean(one && one.ownershipKnown),
   profileIdMatches: one && one.profileKnown ? one.profileId === targetProfileId : null,
-  meaning: "Inventory match for one exact name. Absence does not prove finish succeeded. Presence does not claim, resume, or close the space.",
+  extraKeys: one ? one.extraKeys : [],
+  listedFields: one ? one.listedFields : {},
+  pagesClosed: "not-observed",
+  meaning: "Inventory match for one exact name. Guide v2.2.0 says task spaces persist, so presence does not mean finish failed and absence does not prove pages closed. This command does not call task.pages().",
 }));
 `;
 }
