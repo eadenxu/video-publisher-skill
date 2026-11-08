@@ -131,6 +131,8 @@ export function extractSpaceRecords(payload) {
       name,
       profileId: profileFieldPresent && node.profileId != null ? String(node.profileId) : null,
       profileFieldPresent,
+      ownership: Object.prototype.hasOwnProperty.call(node, "ownership") && node.ownership != null ? String(node.ownership) : null,
+      ownershipKnown: Object.prototype.hasOwnProperty.call(node, "ownership") && node.ownership != null,
     });
   });
   const unique = [];
@@ -503,6 +505,42 @@ export function summarizeManagerText(text) {
   };
 }
 
+export function selectMaintenanceCloseTarget({ spaceName, spaceId, profileId, profilesPayload, spacesPayload }) {
+  const profiles = extractProfileRecords(profilesPayload);
+  if (!profiles.records.length || profiles.shape === "unrecognized" || !profiles.records.some(record => record.profileId === profileId)) {
+    return { ok: false, code: "PROFILE_NOT_LISTED", taskSpaceAllowed: false };
+  }
+  const spaces = extractSpaceRecords(spacesPayload);
+  if (spaces.shape === "unrecognized") {
+    return { ok: false, code: "SPACE_LIST_UNVERIFIED", taskSpaceAllowed: false };
+  }
+  const wantedId = String(spaceId);
+  const matches = spaces.records.filter(record => record.name === spaceName || String(record.id) === wantedId);
+  if (matches.length !== 1) {
+    return { ok: false, code: matches.length === 0 ? "SPACE_ABSENT" : "SPACE_AMBIGUOUS", taskSpaceAllowed: false, matchCount: matches.length };
+  }
+  const match = matches[0];
+  if (match.name !== spaceName || String(match.id) !== wantedId) {
+    return { ok: false, code: "SPACE_ID_NAME_MISMATCH", taskSpaceAllowed: false };
+  }
+  if (!match.ownershipKnown || match.ownership !== "agent") {
+    return { ok: false, code: "SPACE_OWNERSHIP_UNVERIFIED", taskSpaceAllowed: false };
+  }
+  if (!match.profileFieldPresent || match.profileId !== profileId) {
+    return { ok: false, code: "SPACE_PROFILE_MISMATCH", taskSpaceAllowed: false };
+  }
+  return { ok: true, code: "MATCHED", taskSpaceAllowed: true, spaceId: match.id, spaceName: match.name, ownership: match.ownership, profileId: match.profileId };
+}
+
+export function maintenanceCloseInventory(spacesPayload, { spaceName, spaceId }) {
+  const spaces = extractSpaceRecords(spacesPayload);
+  if (spaces.shape === "unrecognized") return { checked: true, code: "SPACE_LIST_UNVERIFIED" };
+  const wantedId = String(spaceId);
+  const matches = spaces.records.filter(record => record.name === spaceName || String(record.id) === wantedId);
+  if (matches.length === 0) return { checked: true, code: "SPACE_ABSENT" };
+  return { checked: true, code: "STILL_PRESENT", matchCount: matches.length };
+}
+
 export function assertMaintenanceScript(script) {
   const forbidden = [
     /useOrCreateTaskSpace/,
@@ -850,6 +888,156 @@ export function parseMaintenanceSpaceStatus(text) {
   const parsed = parseJsonValue(source, at + marker.length);
   if (!parsed.ok) return { ok: false, error: parsed.error };
   return { ok: true, payload: parsed.value };
+}
+
+export function buildMaintenanceCloseScript(input) {
+  const helpers = `
+function maintenanceJson(state) {
+  return JSON.stringify({ runId: input.runId, ...state });
+}
+async function emitMaintenance(state) {
+  const body = maintenanceJson(state);
+  console.log("VIDEO_PUBLISHER_MAINTENANCE:" + body);
+  if (!input.checkpointPath) return;
+  try {
+    const fs = await import("node:fs");
+    fs.writeFileSync(input.checkpointPath, body + "\\n", { mode: 0o600 });
+  } catch (error) {
+    console.log("VIDEO_PUBLISHER_MAINTENANCE_CHECKPOINT_ERROR:" + JSON.stringify(String(error && error.message || error)));
+  }
+}
+`;
+  const runner = `
+const input = ${JSON.stringify(input)};
+const base = {
+  pureReadOnly: false,
+  pageOpened: false,
+  retried: false,
+  publishUrlOpened: false,
+  mediaRead: false,
+  finalGuardReleaseCalled: false,
+  ready: false,
+  accepted: false,
+  publishable: false,
+  accountVerified: false,
+  sideEffects: "reported",
+};
+const profilesPayload = await profiles();
+const spacesPayload = await listTaskSpaces();
+const decision = selectMaintenanceCloseTarget({
+  spaceName: input.spaceName,
+  spaceId: input.spaceId,
+  profileId: input.profileId,
+  profilesPayload,
+  spacesPayload,
+});
+if (!decision.taskSpaceAllowed) {
+  await emitMaintenance({
+    ...base,
+    taskSpaceCalled: false,
+    handleMatched: false,
+    decisionCode: decision.code,
+    closeResult: { closed: false, reason: "inventory-refused" },
+    inventoryAfter: { checked: false },
+  });
+} else {
+  let handle = null;
+  let callError = "";
+  try {
+    handle = await taskSpace(input.spaceId);
+  } catch (error) {
+    callError = String(error && error.message || error);
+  }
+  if (!handle) {
+    const userControl = /USER_CONTROL/.test(callError);
+    await emitMaintenance({
+      ...base,
+      taskSpaceCalled: true,
+      handleMatched: false,
+      decisionCode: decision.code,
+      callError,
+      closeResult: { closed: false, reason: userControl ? "user-control" : "taskSpace-threw", error: callError },
+      inventoryAfter: { checked: false },
+    });
+  } else {
+    const handleId = handle.spaceId != null ? handle.spaceId : (handle.id != null ? handle.id : null);
+    const handleName = handle.name == null ? "" : String(handle.name);
+    const handleOwnership = handle.ownership == null ? null : String(handle.ownership);
+    const handleMatched = String(handleId) === String(input.spaceId)
+      && handleName === input.spaceName
+      && handleOwnership === "agent";
+    if (!handleMatched) {
+      await emitMaintenance({
+        ...base,
+        taskSpaceCalled: true,
+        handleMatched: false,
+        decisionCode: "HANDLE_MISMATCH",
+        spaceId: handleId,
+        spaceName: handleName,
+        ownership: handleOwnership,
+        closeResult: { closed: false, reason: "handle-mismatch" },
+        inventoryAfter: { checked: false },
+        substituteCreated: "unknown",
+      });
+    } else {
+      await emitMaintenance({
+        ...base,
+        taskSpaceCalled: true,
+        handleMatched: true,
+        decisionCode: decision.code,
+        spaceId: handleId,
+        spaceName: handleName,
+        ownership: handleOwnership,
+        closeResult: { closed: null, reason: "pending" },
+        inventoryAfter: { checked: false },
+      });
+      let closeResult = { closed: null, reason: "pending" };
+      try {
+        if (typeof handle.finish !== "function") closeResult = { closed: false, reason: "finish-not-on-handle" };
+        else {
+          await handle.finish({ keep: false });
+          closeResult = { closed: true, keep: false, reason: "finish-returned" };
+        }
+      } catch (error) {
+        closeResult = { closed: false, reason: "finish-threw", error: String(error && error.message || error) };
+      }
+      let inventoryAfter = { checked: false };
+      if (closeResult.reason === "finish-returned") {
+        try {
+          inventoryAfter = maintenanceCloseInventory(await listTaskSpaces(), { spaceName: input.spaceName, spaceId: input.spaceId });
+        } catch (error) {
+          inventoryAfter = { checked: false, error: String(error && error.message || error) };
+        }
+      }
+      await emitMaintenance({
+        ...base,
+        taskSpaceCalled: true,
+        handleMatched: true,
+        decisionCode: decision.code,
+        spaceId: handleId,
+        spaceName: handleName,
+        ownership: handleOwnership,
+        closeResult,
+        inventoryAfter,
+      });
+    }
+  }
+}
+`;
+  return `${helpers}${runner}`;
+}
+
+export function assertMaintenanceCloseScript(script) {
+  const calls = script.match(/await taskSpace\s*\(/g) || [];
+  if (calls.length !== 1) throw new Error("maintenance close must call taskSpace once");
+  if (!script.includes("await taskSpace(input.spaceId)")) throw new Error("maintenance close must resume by the expected id");
+  if (/await taskSpace\s*\([^)]*profileId|claimTaskSpace|page\.goto|newPage\s*\(|\/publish\/publish|releaseForConfirmedPublish/.test(script)) {
+    throw new Error("maintenance close contains a forbidden call");
+  }
+  const factAt = script.indexOf("VIDEO_PUBLISHER_MAINTENANCE:");
+  const finishAt = script.indexOf("await handle.finish");
+  if (!(factAt >= 0 && finishAt > factAt)) throw new Error("close facts must be logged before finish");
+  if (!script.includes("\"pending\"")) throw new Error("close must stay pending until finish returns");
 }
 
 export function sameAccountBinding(left, right) {

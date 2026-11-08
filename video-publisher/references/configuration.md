@@ -111,7 +111,7 @@ node scripts/config.mjs validate-maintenance
 
 `validate-maintenance` 成功时退出码 0，输出 `maintenanceReady: true`、`productionReady: false`、`onboardingRequired: true`、`errors: []`、`warnings: []`。它不创建维护状态目录，不拿 publisher 锁，不调用 Ego。同一文件再跑 `node scripts/config.mjs validate` 必须退出码 1。create、resume、inspect 以及其他生产命令读到这份配置时，在读取内容包和媒体之前拒绝。`maintenance-diagnose` 读到生产配置时，在 Ego 之前拒绝。身份缺字段，或命令行的 `--profile-id`、`--display-name`、`--account-id`、非空 `--profile-label` 与文件不一致，也在 Ego 之前拒绝。
 
-检查通过后才按 `references/scripts.md` 运行 `maintenance-diagnose`。截图没有可选旗标，页面打开后自动写入 `--maintenance-root`：`<空间名>-home.png`，以及首页匹配后的 `<空间名>-notes.png`。记录文件是 `<空间名>.json`。同一次运行还会写 `<空间名>.checkpoint.json` 和 `<空间名>.ego.log`。`--close-maintenance-space` 是不带值的布尔旗标，只关闭同一次命令创建且名称相符的句柄。`finish` 的返回丢失时，关闭结果是 `unknown`，不能写成已关闭。缺少 marker 时，空间、首页身份和管理页都是 `unknown`；截图文件在场也不改这些字段。`maintenance-space-status` 使用同一份维护配置，不要求 `productionReady`。它只按精确名称查看库存，不创建、不接管、不关闭。找不到名称也不证明上次 `finish` 成功。
+检查通过后才按 `references/scripts.md` 运行 `maintenance-diagnose`。截图没有可选旗标，页面打开后自动写入 `--maintenance-root`：`<空间名>-home.png`，以及首页匹配后的 `<空间名>-notes.png`。记录文件是 `<空间名>.json`。同一次运行还会写 `<空间名>.checkpoint.json` 和 `<空间名>.ego.log`。`--close-maintenance-space` 是不带值的布尔旗标，只关闭同一次命令创建且名称相符的句柄。`finish` 的返回丢失时，关闭结果是 `unknown`，不能写成已关闭。缺少 marker 时，空间、首页身份和管理页都是 `unknown`；截图文件在场也不改这些字段。`maintenance-space-status` 使用同一份维护配置，不要求 `productionReady`。它只按精确名称查看库存，不创建、不接管、不关闭。找不到名称也不证明上次 `finish` 成功。`maintenance-close-space` 也使用这份配置。它在新鲜库存同时匹配期望 id、精确 `vp-maint-` 名称、Profile id 和 `ownership: "agent"` 之后，才调用不带 `profileId` 的 `taskSpace(id)` 并 `finish({ keep: false })`。这不是纯读。`taskSpace(id)` 仍是复用或创建；调用和 `finish` 回执、之后的库存消失是三件分开的事。生产 create、resume、inspect 仍然拒绝这份配置。
 
 ## 新增平台
 

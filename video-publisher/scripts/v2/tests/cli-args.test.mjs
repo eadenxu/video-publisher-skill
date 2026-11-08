@@ -166,7 +166,7 @@ test("maintenance diagnose requires an explicit binding and a separate root", ()
     "--account-id", "1000000001",
     "--maintenance-space-name", "vp-maint-account-check-585fe53-20261108-1201",
     "--close-maintenance-space",
-  ]), /does not close a space/);
+  ]), /does not accept --close-maintenance-space/);
 });
 
 test("explicit operations guard cover replacement and repost", () => {

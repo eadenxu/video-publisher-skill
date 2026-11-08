@@ -146,7 +146,22 @@ node scripts/v2/publisher.mjs \
 
 The script logs `VIDEO_PUBLISHER_MAINTENANCE:` and writes `<maintenance-root>/<maintenance-space-name>.checkpoint.json` before `finish`. `closeResult.closed` is true only when `finish` returns. If that return is lost, close stays `unknown`; it is not reported as success. A missing marker leaves `sideEffects`, space id, home identity, and note-manager as `unknown`, even when the screenshot files exist. Those files are recorded under `screenshotFilesPresent` and do not set `homeIdentityMatched`. The raw child stdout and stderr are saved only by this version, at `<maintenance-root>/<maintenance-space-name>.ego.log`, with `exitCode`, `----- stdout -----`, and `----- stderr -----`. The 585fe53 run did not write that log or a checkpoint; its retained output is the publisher JSON and the two screenshots.
 
-`maintenance-space-status` uses the same `maintenance-account-observation` config as `maintenance-diagnose`. It does not require `productionReady`. It calls `profiles()` and `listTaskSpaces()` and prints only the exact `--maintenance-space-name`. It does not call `taskSpace`, open a page, or finish. `found: false` means that snapshot did not contain the name. It does not prove the earlier finish succeeded. `found: true` returns `spaceId` when the list has it and does not claim or close the space. There is no supported no-claim close: `taskSpace(name)` is reuse-or-create, so it can resume or create. Do not use it to clean up `vp-maint-account-check-585fe53-20261108-1201` unless a later authorization accepts that side effect.
+`maintenance-space-status` uses the same `maintenance-account-observation` config as `maintenance-diagnose`. It does not require `productionReady`. It calls `profiles()` and `listTaskSpaces()` and prints only the exact `--maintenance-space-name`. It does not call `taskSpace`, open a page, or finish. `found: false` means that snapshot did not contain the name. It does not prove the earlier finish succeeded. `found: true` returns `spaceId` when the list has it and does not claim or close the space.
+
+`maintenance-close-space` is the supported way to finish one own maintenance space. It is not a pure read. It first requires one fresh inventory row whose id, exact `vp-maint-` name, `profileId`, and `ownership: "agent"` all match the command. Only then does it call `taskSpace(id)` with no `profileId` and no `claimTaskSpace`. The returned handle must have the same id, the same name, and `ownership: "agent"` before `finish({ keep: false })`. A missing, ambiguous, mismatched, or unknown inventory row never calls `taskSpace`. A thrown `USER_CONTROL`, a mismatched handle, or a failed finish does not retry and does not call `taskSpace` again. `taskSpace(id)` is still reuse-or-create: if the id disappears between the list and the call, the call can attach or create something else. That handle is not finished. The command does not guarantee the call created nothing. `closeResult` is only the finish receipt. `inventoryCleared` is a separate later `listTaskSpaces` snapshot. Exit 0 requires both the finish receipt and that later snapshot to show the id and name absent. No page is opened.
+
+```bash
+export VIDEO_PUBLISHER_CONFIG="$HOME/.config/video-publisher-maintenance/config.json"
+node scripts/v2/publisher.mjs \
+  --operation maintenance-close-space \
+  --profile-id "Profile 2" \
+  --profile-label "AI" \
+  --display-name "GrokBot看AI" \
+  --account-id "4221066816" \
+  --maintenance-space-name "vp-maint-account-check-585fe53-20261108-1201" \
+  --maintenance-space-id 107 \
+  --maintenance-root "$HOME/.local/state/video-publisher-maintenance"
+```
 
 ```bash
 node scripts/config.mjs bind-account xiaohongshu \
